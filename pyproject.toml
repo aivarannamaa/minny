@@ -1,0 +1,74 @@
+[build-system]
+requires = ["uv_build>=0.7.20,<0.8.0"]
+build-backend = "uv_build"
+
+[project]
+name = "minny"
+version = "0.0.1a1"
+dependencies = [
+    "packaging",
+    "pyserial",
+    "filelock",
+    "websockets",
+    "mpy-cross-v6.3"
+]
+requires-python = ">=3.11"
+authors = [
+  {name = "Aivar Annamaa", email = "aivarannamaa@users.noreply.github.com"},
+]
+description = "Package and project manager for MicroPython and CircuitPython"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICEN[CS]E.*"]
+keywords = ["MicroPython", "CircuitPython"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python"
+]
+
+[project.urls]
+Source = "https://github.com/aivarannamaa/minny"
+Issues = "https://github.com/aivarannamaa/minny/issues"
+Documentation = "https://github.com/aivarannamaa/minny/blob/main/READmE.md"
+Changelog = "https://github.com/aivarannamaa/minny/blob/main/CHANGELOG.md"
+
+
+[tool.isort]
+profile = "black"
+src_paths = ["minny"]
+line_length = 100
+skip = ["tests/data"]
+
+[tool.ruff]
+line-length = 100
+# Exclude a variety of commonly ignored directories.
+exclude = [".venv", ".git", "dist", "docs", "misc", "out", "tests/data"]
+
+[tool.ty.src]
+include = ["src", "tests"]
+exclude = ["tests/data"]
+
+[tool.pyrefly]
+project-includes = ["src", "tests"]
+project-excludes = ["tests/data"]
+search-path = ["src", "tests"]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.4.1",
+  "syrupy",
+  "ruff>=0.12.9",
+  "ty>=0.0.1a19",
+  "pyrefly>=0.29.0",
+]
+typeshed = [
+    "micropython-typeshed>=0.1.0",
+]
+typings = [
+    "micropython-rp2-stubs>=1.25.0.post3",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow"
+]

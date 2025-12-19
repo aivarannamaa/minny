@@ -1,0 +1,7 @@
+# serializer version: 1
+# name: test_complex
+  MinnySettings(dependencies=DependenciesTable(pip=['adafruit-circuitpython-lcd>=2.3', 'adafruit-circuitpython-iobase'], mip=['logging', 'unittest@1.2.3'], circup=['some-obscure-lib']), deploy=DeployTable(current_package_installer='auto', files=[DeployFilesItem(source='src', destination='/', include=['main.py', 'code.py', 'boot.py'], exclude=['special-module.py'], compile=['**/*.py'], no_compile=[]), DeployFilesItem(source='auto', destination='/lib', include=['special-module.py'], exclude=[], compile=[], no_compile=[])], packages=[DeployPackagesItem(destination='/lib', include=['*'], exclude=['asyncio', '.'], compile=['*'], no_compile=[])]))
+# ---
+# name: test_implicit_deploy_packages
+  MinnySettings(dependencies=DependenciesTable(pip=['adafruit-circuitpython-lcd'], mip=[], circup=[]), deploy=DeployTable(current_package_installer='auto', files=[DeployFilesItem(source='auto', destination='auto', include=['main.py', 'boot.py'], exclude=[], compile=[], no_compile=[])], packages=[DeployPackagesItem(destination='auto', include=['auto'], exclude=[], compile=['*'], no_compile=[])]))
+# ---

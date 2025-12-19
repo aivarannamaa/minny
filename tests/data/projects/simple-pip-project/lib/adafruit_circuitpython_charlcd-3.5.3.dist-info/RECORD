@@ -1,0 +1,7 @@
+adafruit_character_lcd/__init__.py,,0
+adafruit_character_lcd/character_lcd.py,,25385
+adafruit_character_lcd/character_lcd_i2c.py,,3687
+adafruit_character_lcd/character_lcd_rgb_i2c.py,,6444
+adafruit_character_lcd/character_lcd_spi.py,,2688
+adafruit_circuitpython_charlcd-3.5.3.dist-info/METADATA,,5702
+adafruit_circuitpython_charlcd-3.5.3.dist-info/RECORD,,

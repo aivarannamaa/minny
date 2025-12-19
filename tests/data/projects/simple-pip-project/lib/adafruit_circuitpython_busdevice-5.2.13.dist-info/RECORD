@@ -1,0 +1,5 @@
+adafruit_bus_device/__init__.py,,0
+adafruit_bus_device/i2c_device.py,,6188
+adafruit_bus_device/spi_device.py,,3904
+adafruit_circuitpython_busdevice-5.2.13.dist-info/METADATA,,4094
+adafruit_circuitpython_busdevice-5.2.13.dist-info/RECORD,,

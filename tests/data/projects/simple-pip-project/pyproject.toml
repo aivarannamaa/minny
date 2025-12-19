@@ -1,0 +1,5 @@
+[project]
+name = "simple-circuitpython-project"
+version = "1.0.0b1"
+
+dependencies = ["adafruit-circuitpython-charlcd"]

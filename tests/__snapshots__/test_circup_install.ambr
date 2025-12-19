@@ -1,0 +1,44 @@
+# serializer version: 1
+# name: test_no_deps_install
+  dict({
+    '.circup': -1,
+    '.circup/adafruit_character_lcd-3.5.3-py.meta': 421,
+    'adafruit_character_lcd': -1,
+    'adafruit_character_lcd/__init__.py': 0,
+    'adafruit_character_lcd/character_lcd.py': 25385,
+    'adafruit_character_lcd/character_lcd_i2c.py': 3687,
+    'adafruit_character_lcd/character_lcd_rgb_i2c.py': 6444,
+    'adafruit_character_lcd/character_lcd_spi.py': 2688,
+  })
+# ---
+# name: test_with_deps_install
+  dict({
+    '.circup': -1,
+    '.circup/adafruit_74hc595-1.5.0-py.meta': 167,
+    '.circup/adafruit_bus_device-5.2.14-py.meta': 238,
+    '.circup/adafruit_character_lcd-3.5.3-py.meta': 421,
+    '.circup/adafruit_mcp230xx-2.5.19-py.meta': 481,
+    'adafruit_74hc595.py': 6642,
+    'adafruit_bus_device': -1,
+    'adafruit_bus_device/__init__.py': 0,
+    'adafruit_bus_device/i2c_device.py': 6188,
+    'adafruit_bus_device/spi_device.py': 3904,
+    'adafruit_character_lcd': -1,
+    'adafruit_character_lcd/__init__.py': 0,
+    'adafruit_character_lcd/character_lcd.py': 25385,
+    'adafruit_character_lcd/character_lcd_i2c.py': 3687,
+    'adafruit_character_lcd/character_lcd_rgb_i2c.py': 6444,
+    'adafruit_character_lcd/character_lcd_spi.py': 2688,
+    'adafruit_mcp230xx': -1,
+    'adafruit_mcp230xx/__init__.py': 106,
+    'adafruit_mcp230xx/digital_inout.py': 5695,
+    'adafruit_mcp230xx/mcp23008.py': 3038,
+    'adafruit_mcp230xx/mcp23016.py': 4453,
+    'adafruit_mcp230xx/mcp23017.py': 11716,
+    'adafruit_mcp230xx/mcp230xx.py': 2181,
+    'adafruit_mcp230xx/mcp23s08.py': 3190,
+    'adafruit_mcp230xx/mcp23s17.py': 10948,
+    'adafruit_mcp230xx/mcp23sxx.py': 2784,
+    'adafruit_mcp230xx/mcp23xxx.py': 1011,
+  })
+# ---

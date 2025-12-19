@@ -1,0 +1,6 @@
+[tool.minny.dependencies]
+mip = []
+pip = ["adafruit-circuitpython-lcd"]
+
+[tool.minny.deploy.files]
+include = ["main.py", "boot.py"]

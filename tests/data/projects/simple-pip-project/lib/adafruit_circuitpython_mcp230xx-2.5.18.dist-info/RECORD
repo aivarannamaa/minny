@@ -1,0 +1,12 @@
+adafruit_circuitpython_mcp230xx-2.5.18.dist-info/METADATA,,4030
+adafruit_mcp230xx/__init__.py,,106
+adafruit_mcp230xx/digital_inout.py,,5695
+adafruit_mcp230xx/mcp23008.py,,3038
+adafruit_mcp230xx/mcp23016.py,,4453
+adafruit_mcp230xx/mcp23017.py,,11716
+adafruit_mcp230xx/mcp230xx.py,,2181
+adafruit_mcp230xx/mcp23s08.py,,3190
+adafruit_mcp230xx/mcp23s17.py,,10948
+adafruit_mcp230xx/mcp23sxx.py,,2784
+adafruit_mcp230xx/mcp23xxx.py,,1011
+adafruit_circuitpython_mcp230xx-2.5.18.dist-info/RECORD,,

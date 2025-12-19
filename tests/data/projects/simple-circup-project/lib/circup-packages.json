@@ -1,0 +1,93 @@
+{
+  "packages": {
+    "adafruit_character_lcd": {
+      "version": "3.5.3",
+      "files": [
+        {
+          "path": "adafruit_character_lcd/character_lcd_rgb_i2c.py"
+        },
+        {
+          "path": "adafruit_character_lcd/__init__.py"
+        },
+        {
+          "path": "adafruit_character_lcd/character_lcd_i2c.py"
+        },
+        {
+          "path": "adafruit_character_lcd/character_lcd_spi.py"
+        },
+        {
+          "path": "adafruit_character_lcd/character_lcd.py"
+        }
+      ],
+      "dependencies": [
+        "adafruit_mcp230xx",
+        "adafruit_bus_device",
+        "adafruit_74hc595"
+      ]
+    },
+    "adafruit_mcp230xx": {
+      "version": "2.5.18",
+      "files": [
+        {
+          "path": "adafruit_mcp230xx/mcp23xxx.py"
+        },
+        {
+          "path": "adafruit_mcp230xx/mcp230xx.py"
+        },
+        {
+          "path": "adafruit_mcp230xx/__init__.py"
+        },
+        {
+          "path": "adafruit_mcp230xx/mcp23sxx.py"
+        },
+        {
+          "path": "adafruit_mcp230xx/mcp23017.py"
+        },
+        {
+          "path": "adafruit_mcp230xx/mcp23s17.py"
+        },
+        {
+          "path": "adafruit_mcp230xx/mcp23016.py"
+        },
+        {
+          "path": "adafruit_mcp230xx/mcp23s08.py"
+        },
+        {
+          "path": "adafruit_mcp230xx/digital_inout.py"
+        },
+        {
+          "path": "adafruit_mcp230xx/mcp23008.py"
+        }
+      ],
+      "dependencies": [
+        "adafruit_bus_device"
+      ]
+    },
+    "adafruit_bus_device": {
+      "version": "5.2.13",
+      "files": [
+        {
+          "path": "adafruit_bus_device/i2c_device.py"
+        },
+        {
+          "path": "adafruit_bus_device/spi_device.py"
+        },
+        {
+          "path": "adafruit_bus_device/__init__.py"
+        }
+      ],
+      "dependencies": []
+    },
+    "adafruit_74hc595": {
+      "version": "1.4.8",
+      "files": [
+        {
+          "path": "./adafruit_74hc595.py"
+        }
+      ],
+      "dependencies": [
+        "adafruit_bus_device"
+      ]
+    }
+  }
+}

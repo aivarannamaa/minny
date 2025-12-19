@@ -1,0 +1,12 @@
+adafruit_circuitpython_typing-1.12.1.dist-info/METADATA,,3313
+circuitpython_typing/__init__.py,,5752
+circuitpython_typing/device_drivers.py,,840
+circuitpython_typing/displayio.py,,533
+circuitpython_typing/http.py,,899
+circuitpython_typing/io.py,,1116
+circuitpython_typing/led.py,,951
+circuitpython_typing/pil.py,,1572
+circuitpython_typing/pwmio.py,,742
+circuitpython_typing/py.typed,,0
+circuitpython_typing/socket.py,,4806
+adafruit_circuitpython_typing-1.12.1.dist-info/RECORD,,

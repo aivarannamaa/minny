@@ -1,0 +1,32 @@
+[tool.minny.dependencies]
+# specify dependencies here if you don't want to create a package (allows doing away with the [project] table)
+mip = ["logging", "unittest@1.2.3"]
+pip = ["adafruit-circuitpython-lcd>=2.3", "adafruit-circuitpython-iobase"]
+circup = ["some-obscure-lib"]
+
+# There are two modes of deployment
+# glob values can be given as single glob or array of globs -- no, let's make it stricter first
+
+# NB! The default value for files may have table with different values than the default values of user's files table.
+# ... but it may be more clear if they are the same.
+# It may be dangerous to assign default value for exclude.
+
+[[tool.minny.deploy.files]]
+source = "src" # default: "auto". Must be relative to pyproject.toml
+destination = "/" # default: "auto". Real path must be absolute
+include = ["main.py", "code.py", "boot.py"] # default: "auto", meaning all py-files which are not part of current package except "manifest.py" and "setup.py"
+exclude = ["special-module.py"] # default: []
+compile = ["**/*.py"] # default: "auto", meaning entry files don't get compiled. Most users would use either "auto" or []
+
+[[tool.minny.deploy.files]]
+destination = "/lib" # default: "auto". Real path must be absolute
+include = ["special-module.py"]
+
+[[tool.minny.deploy.packages]]
+# All selection values refer to packages, not files (including compile).
+# If you want to tweak a package, then exclude it here and deploy as files. In the future I may add exclude-files
+destination = "/lib" # default: "auto". Real path must be absolute
+include = ["*"] # defaults to all dependencies and current package
+exclude = ["asyncio", "."] # Current package can be specified by name or as "./package.json" or "." or "./" (just like you can omit "package.json" in mip install)
+
+compile = ["*"] # default. Compiling a package means compiling all its modules
