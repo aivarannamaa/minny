@@ -1,3 +1,6 @@
+ALL_EXPLAINED_STATUS_CODE = 193
+
+
 class UserError(RuntimeError):
     pass
 

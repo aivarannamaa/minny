@@ -24,6 +24,10 @@ classifiers = [
   "Programming Language :: Python"
 ]
 
+[project.optional-dependencies]
+ssh = ["paramiko"]
+unix = ["ptyprocess"]
+
 [project.urls]
 Source = "https://github.com/aivarannamaa/minny"
 Issues = "https://github.com/aivarannamaa/minny/issues"
@@ -58,7 +62,10 @@ dev = [
     "ruff>=0.12.9",
     "ty>=0.0.1a19",
     "pyrefly>=0.29.0",
-    "types-pyserial"
+    "types-pyserial",
+    # extras
+    "paramiko",
+    "ptyprocess"
 ]
 
 [tool.pytest.ini_options]
