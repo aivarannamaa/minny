@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from logging import getLogger
 from typing import Any, Callable, Dict, List, Optional
 
-from minny import UserError
+from minny.common import UserError
 
 logger = getLogger(__name__)
 

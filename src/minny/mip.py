@@ -2,7 +2,7 @@ import os.path
 import urllib.parse
 from typing import List, Optional
 
-from minny import UserError
+from minny.common import UserError
 from minny.installer import EditableInfo, Installer, PackageMetadata
 from minny.util import parse_json_file
 

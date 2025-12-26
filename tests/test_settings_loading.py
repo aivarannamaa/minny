@@ -1,7 +1,7 @@
 import os.path
 
 import pytest
-from minny import UserError
+from minny.common import UserError
 from minny.settings import MinnySettings, load_minny_settings_from_pyproject_toml
 from minny.util import parse_toml_file
 

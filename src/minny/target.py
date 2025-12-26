@@ -12,11 +12,11 @@ KNOWN_VID_PIDS = {(0x2E8A, 0x0005)}  # Raspberry Pi Pico
 logger = getLogger(__name__)
 
 
-class Adapter(ABC):
+class TargetManager(ABC):
     """
-    It is assumed that during the lifetime of an Adapter, sys.path stays fixed and
-    distributions and sys.path directories are only manipulated via this Adapter.
-    This requirement is related to the caching used in BaseAdapter.
+    It is assumed that during the lifetime of a target manager, sys.path stays fixed and
+    distributions and sys.path directories are only manipulated via this target manager.
+    This requirement is related to the caching used in TargetManager.
     """
 
     def __init__(self):
@@ -130,24 +130,26 @@ class Adapter(ABC):
     def mkdir_in_existing_parent_exists_ok(self, path: str) -> None: ...
 
 
-def create_adapter(port: Optional[str], mount: Optional[str], dir: Optional[str], **kw) -> Adapter:
+def create_target_manager(
+    port: Optional[str], mount: Optional[str], dir: Optional[str], **kw
+) -> TargetManager:
     if port:
-        from minny import bare_metal, serial_connection
+        from minny import bare_metal_target, serial_connection
 
         connection = serial_connection.SerialConnection(port)
-        return bare_metal.SerialPortAdapter(connection)
+        return bare_metal_target.SerialPortTargetManager(connection)
     elif dir:
-        from minny.dir_adapter import DirAdapter
+        from minny.dir_target import DirTargetManager
 
-        return DirAdapter(dir)
+        return DirTargetManager(dir)
     elif mount:
         # TODO infer port
         raise NotImplementedError("mount not supported yet")
     else:
-        return _infer_adapter()
+        return _infer_target_manager()
 
 
-def _infer_adapter() -> Adapter:
+def _infer_target_manager() -> TargetManager:
     from serial.tools.list_ports import comports
 
     candidates = [("port", p.device) for p in comports() if (p.vid, p.pid) in KNOWN_VID_PIDS]
@@ -166,10 +168,10 @@ def _infer_adapter() -> Adapter:
 
     kind, arg = candidates[0]
     if kind == "port":
-        from minny import bare_metal, serial_connection
+        from minny import bare_metal_target, serial_connection
 
         connection = serial_connection.SerialConnection(arg)
-        return bare_metal.SerialPortAdapter(connection)
+        return bare_metal_target.SerialPortTargetManager(connection)
     else:
         assert kind == "mount"
         # TODO infer port

@@ -6,10 +6,10 @@ from copy import deepcopy
 from logging import getLogger
 from typing import Dict, List, NotRequired, Optional, TypedDict
 
-from minny import UserError
-from minny.adapters import Adapter
+from minny.common import UserError
 from minny.compiling import Compiler
-from minny.dir_adapter import DirAdapter
+from minny.dir_target import DirTargetManager
+from minny.target import TargetManager
 from minny.tracking import TrackedPackageInfo, Tracker
 from minny.util import parse_editable_spec, read_requirements_from_txt_file
 from packaging.requirements import Requirement
@@ -58,9 +58,13 @@ class Installer(ABC):
     """Base class for all package installers."""
 
     def __init__(
-        self, adapter: Adapter, tracker: Tracker, target_dir: Optional[str], minny_cache_dir: str
+        self,
+        tmgr: TargetManager,
+        tracker: Tracker,
+        target_dir: Optional[str],
+        minny_cache_dir: str,
     ):
-        self._adapter = adapter
+        self._tmgr = tmgr
         self._tracker = tracker
         self._minny_cache_dir = minny_cache_dir
         self._custom_target_dir: Optional[str] = target_dir
@@ -71,7 +75,7 @@ class Installer(ABC):
         if self._custom_target_dir is not None:
             return self._custom_target_dir
         else:
-            return self._adapter.get_default_target()
+            return self._tmgr.get_default_target()
 
     @abstractmethod
     def get_installer_name(self) -> str: ...
@@ -118,8 +122,8 @@ class Installer(ABC):
             self._uninstall_package(package_name)
 
     def validate_editables(self, editables: Optional[List[str]]) -> None:
-        if editables and not isinstance(self._adapter, DirAdapter):
-            raise UserError("Editable install is allowed only with dir adapter")
+        if editables and not isinstance(self._tmgr, DirTargetManager):
+            raise UserError("Editable install is allowed only with dir tmgr")
 
     def _uninstall_package(self, name: str) -> None:
         canonical_name = self.canonicalize_package_name(name)
@@ -133,19 +137,19 @@ class Installer(ABC):
 
         package_meta = self.load_package_metadata(installation_info)
         for file_rel_path in package_meta["files"]:
-            full_path = self._adapter.join_path(self.get_target_dir(), file_rel_path)
+            full_path = self._tmgr.join_path(self.get_target_dir(), file_rel_path)
             print("Uninstalling:", full_path)
             if self._tracker.remove_file_if_exists(full_path):
-                parent_dir = full_path.rsplit(self._adapter.get_dir_sep(), maxsplit=1)[0]
+                parent_dir = full_path.rsplit(self._tmgr.get_dir_sep(), maxsplit=1)[0]
                 if parent_dir not in dirs_to_check:
                     dirs_to_check.append(parent_dir)
 
         # remove directories, which became empty because of this uninstall (except target)
         while dirs_to_check:
             dir_to_check = dirs_to_check.pop(0)
-            if dir_to_check != self.get_target_dir() and not self._adapter.listdir(dir_to_check):
+            if dir_to_check != self.get_target_dir() and not self._tmgr.listdir(dir_to_check):
                 print("Removing empty directory:", dir_to_check)
-                self._adapter.rmdir(dir_to_check)
+                self._tmgr.rmdir(dir_to_check)
                 parent_dir = dir_to_check.rsplit("/", maxsplit=1)[0]
                 if parent_dir not in dirs_to_check and parent_dir != self.get_target_dir():
                     dirs_to_check.append(parent_dir)
@@ -178,9 +182,9 @@ class Installer(ABC):
         if original_spec is None:
             return
 
-        assert isinstance(self._adapter, DirAdapter)
+        assert isinstance(self._tmgr, DirTargetManager)
         _, original_project_path = parse_editable_spec(original_spec)
-        abs_lib_dir = os.path.join(self._adapter.base_path, self.get_target_dir().lstrip("/"))
+        abs_lib_dir = os.path.join(self._tmgr.base_path, self.get_target_dir().lstrip("/"))
         from_spec_abs_project_path = os.path.abspath(original_project_path)
         from_meta_abs_project_path = meta["editable"]["project_path"]
         assert os.path.normcase(os.path.normpath(from_spec_abs_project_path)) == os.path.normcase(
@@ -199,7 +203,7 @@ class Installer(ABC):
 
     def save_package_metadata(self, rel_meta_path: str, meta: PackageMetadata) -> None:
         # TODO: order attributes
-        full_path = self._adapter.join_path(
+        full_path = self._tmgr.join_path(
             self.get_target_dir(),
             rel_meta_path,
         )
@@ -209,18 +213,18 @@ class Installer(ABC):
 
     def get_installed_package_infos(self) -> Dict[str, PackageInstallationInfo]:
         rel_meta_dir = f".{self.get_installer_name()}"
-        abs_meta_dir = self._adapter.join_path(self.get_target_dir(), rel_meta_dir)
+        abs_meta_dir = self._tmgr.join_path(self.get_target_dir(), rel_meta_dir)
 
-        if not self._adapter.is_dir(abs_meta_dir):
+        if not self._tmgr.is_dir(abs_meta_dir):
             return {}
 
         result = {}
-        for name in self._adapter.listdir(abs_meta_dir):
+        for name in self._tmgr.listdir(abs_meta_dir):
             if not name.endswith(META_FILE_SUFFIX):
                 logger.debug(f"Ignoring unknown file {name} in meta dir")
                 continue
 
-            rel_meta_file_path = self._adapter.join_path(rel_meta_dir, name)
+            rel_meta_file_path = self._tmgr.join_path(rel_meta_dir, name)
             info = self.parse_meta_file_path(rel_meta_file_path)
             result[info.name] = info
 
@@ -237,7 +241,7 @@ class Installer(ABC):
     def get_package_latest_version(self, name: str) -> Optional[str]: ...
 
     def parse_meta_file_path(self, meta_file_path: str) -> PackageInstallationInfo:
-        _, meta_file_name = self._adapter.split_dir_and_basename(meta_file_path)
+        _, meta_file_name = self._tmgr.split_dir_and_basename(meta_file_path)
         assert meta_file_name is not None
         assert meta_file_name.endswith(META_FILE_SUFFIX)
         parts = meta_file_name[: -len(META_FILE_SUFFIX)].split("-")
@@ -250,14 +254,14 @@ class Installer(ABC):
         )
 
     def load_package_metadata(self, info: PackageInstallationInfo) -> PackageMetadata:
-        raw = self._adapter.read_file(
-            self._adapter.join_path(self.get_target_dir(), info.rel_meta_file_path)
+        raw = self._tmgr.read_file(
+            self._tmgr.join_path(self.get_target_dir(), info.rel_meta_file_path)
         )
         return json.loads(raw)
 
     def get_relative_metadata_path(self, name: str, version: str, module_format: str) -> str:
         file_name = f"{self.slug_package_name(name)}-{self.slug_package_version(version)}-{module_format}{META_FILE_SUFFIX}"
-        return self._adapter.join_path(f".{self.get_installer_name()}", file_name)
+        return self._tmgr.join_path(f".{self.get_installer_name()}", file_name)
 
     @abstractmethod
     def canonicalize_package_name(self, name: str) -> str: ...
@@ -391,7 +395,7 @@ class Installer(ABC):
 
             for rel_target, rel_source in editable_info["files"]:
                 # TODO how to avoid uploading arbitrary files ? Should we?
-                # TODO: use join and normpath suitable for adapter
+                # TODO: use join and normpath suitable for tmgr
                 upload_map[rel_target] = os.path.normpath(
                     os.path.join(self.get_target_dir(), rel_source)
                 )
@@ -404,7 +408,7 @@ class Installer(ABC):
         for target_rel_path, source_abs_path in upload_map.items():
             final_target_rel_path = self._tracker.smart_upload(
                 source_abs_path,
-                self._adapter.get_default_target(),
+                self._tmgr.get_default_target(),
                 target_rel_path,
                 compile,
                 compiler,

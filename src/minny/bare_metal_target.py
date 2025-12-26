@@ -10,11 +10,10 @@ from logging import getLogger
 from textwrap import dedent
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from minny import UserError
-from minny.adapters import Adapter
-from minny.common import CommunicationError, ManagementError, ProtocolError
+from minny.common import CommunicationError, ManagementError, ProtocolError, UserError
 from minny.connection import MicroPythonConnection
 from minny.serial_connection import SerialConnection
+from minny.target import TargetManager
 from minny.util import starts_with_continuation_byte
 
 logger = getLogger(__name__)
@@ -65,7 +64,7 @@ TRACEBACK_MARKER = b"Traceback (most recent call last):"
 OutputConsumer = Callable[[str, str], None]
 
 
-class BareMetalAdapter(Adapter, ABC):
+class BareMetalTargetManager(TargetManager, ABC):
     def __init__(
         self,
         connection: MicroPythonConnection,
@@ -694,7 +693,7 @@ class BareMetalAdapter(Adapter, ABC):
         self._process_output_until_active_prompt(output_consumer, timeout=timeout)
 
 
-class SerialPortAdapter(BareMetalAdapter):
+class SerialPortTargetManager(BareMetalTargetManager):
     def __init__(
         self,
         connection: SerialConnection,
@@ -918,7 +917,7 @@ class SerialPortAdapter(BareMetalAdapter):
             return True
 
 
-class WebReplAdapter(BareMetalAdapter):
+class WebReplTargetManager(BareMetalTargetManager):
     def write_file_in_existing_dir(self, path: str, content: bytes) -> None:
         """
         Adapted from https://github.com/micropython/webrepl/blob/master/webrepl_cli.py

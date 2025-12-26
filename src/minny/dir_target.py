@@ -1,13 +1,15 @@
 import os.path
 import tempfile
 import zlib
+from logging import getLogger
 from typing import Any, Dict, List, Optional
 
-from minny import Adapter, UserError
-from minny.adapters import logger
+from minny.target import TargetManager, UserError
+
+logger = getLogger(__name__)
 
 
-class DirAdapter(Adapter):
+class DirTargetManager(TargetManager):
     def __init__(self, base_path: str):
         if os.path.isfile(base_path):
             raise UserError("base_path should not be a file")
@@ -105,6 +107,6 @@ class DirAdapter(Adapter):
         return "/"
 
 
-class DummyAdapter(DirAdapter):
+class DummyTargetManager(DirTargetManager):
     def __init__(self):
         super().__init__(tempfile.gettempdir())

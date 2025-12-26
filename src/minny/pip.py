@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from minny.compiling import Compiler
-from minny.dir_adapter import DirAdapter
+from minny.dir_target import DirTargetManager
 from minny.installer import META_ENCODING, EditableInfo, Installer, PackageMetadata
 from minny.pyproject_analyzer import collect_editable_package_metadata_from_pip_compatible_project
 from minny.util import (
@@ -75,7 +75,7 @@ class PipInstaller(Installer):
 
         self.validate_editables(editables)
 
-        compiler = Compiler(self._adapter, self._minny_cache_dir, mpy_cross)
+        compiler = Compiler(self._tmgr, self._minny_cache_dir, mpy_cross)
 
         venv_dir = self._populate_venv()
         site_packages_dir = get_venv_site_packages_path(venv_dir)
@@ -216,7 +216,7 @@ class PipInstaller(Installer):
 
         editable_info = meta.get("editable")
         if editable_info is not None:
-            assert isinstance(self._adapter, DirAdapter)
+            assert isinstance(self._tmgr, DirTargetManager)
 
             # For consistence, we need to override installed meta info with info collected from source,
             # even if the result is less precise
@@ -353,8 +353,8 @@ class PipInstaller(Installer):
         if target:
             result = self.check_remove_dist_from_path(dist_name, target)
             could_remove = could_remove or result
-            if above_target and target in self._adapter.get_sys_path():
-                for entry in self._adapter.get_sys_path():
+            if above_target and target in self._tmgr.get_sys_path():
+                for entry in self._tmgr.get_sys_path():
                     if entry == "":
                         continue
                     elif entry == target:
@@ -364,7 +364,7 @@ class PipInstaller(Installer):
                         could_remove = could_remove or result
 
         else:
-            for entry in self._adapter.get_sys_path():
+            for entry in self._tmgr.get_sys_path():
                 if entry.startswith("/"):
                     result = self.check_remove_dist_from_path(dist_name, entry)
                     could_remove = could_remove or result
@@ -375,7 +375,7 @@ class PipInstaller(Installer):
             logger.warning("Could not find %r for removing", dist_name)
 
     def list_dist_info_dir_names(self, path: str, dist_name: Optional[str] = None) -> List[str]:
-        names = self._adapter.listdir(path)
+        names = self._tmgr.listdir(path)
         if dist_name is not None:
             dist_name_in_dist_info_dir = canonicalize_name(dist_name).replace("-", "_")
         else:
@@ -401,24 +401,24 @@ class PipInstaller(Installer):
         return result
 
     def remove_dist_by_dist_info_dir(self, containing_dir: str, dist_info_dir_name: str) -> None:
-        record_bytes = self._adapter.read_file(
-            self._adapter.join_path(containing_dir, dist_info_dir_name, "RECORD")
+        record_bytes = self._tmgr.read_file(
+            self._tmgr.join_path(containing_dir, dist_info_dir_name, "RECORD")
         )
         record_lines = record_bytes.decode(META_ENCODING).splitlines()
 
         package_dirs = set()
         for line in record_lines:
             rel_path, _, _ = line.split(",")
-            abs_path = self._adapter.join_path(containing_dir, rel_path)
+            abs_path = self._tmgr.join_path(containing_dir, rel_path)
             logger.debug("Removing file %s", abs_path)
-            self._adapter.remove_file_if_exists(abs_path)
-            abs_dir, _ = self._adapter.split_dir_and_basename(abs_path)
+            self._tmgr.remove_file_if_exists(abs_path)
+            abs_dir, _ = self._tmgr.split_dir_and_basename(abs_path)
             while len(abs_dir) > len(containing_dir):
                 package_dirs.add(abs_dir)
-                abs_dir, _ = self._adapter.split_dir_and_basename(abs_dir)
+                abs_dir, _ = self._tmgr.split_dir_and_basename(abs_dir)
 
         for abs_dir in sorted(package_dirs, reverse=True):
-            self._adapter.remove_dir_if_empty(abs_dir)
+            self._tmgr.remove_dir_if_empty(abs_dir)
 
     def get_installer_name(self) -> str:
         return "pip"

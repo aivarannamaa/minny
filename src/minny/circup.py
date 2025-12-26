@@ -14,10 +14,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import urlsplit
 
-from minny import Adapter, Compiler
 from minny.common import UserError
+from minny.compiling import Compiler
 from minny.installer import Installer, PackageMetadata
 from minny.settings import SettingsReader
+from minny.target import TargetManager
 from minny.tracking import TrackedPackageInfo, Tracker
 from minny.util import (
     download_bytes,
@@ -72,12 +73,16 @@ EMPTY_TARGET_METADATA = {"packages": {}}
 
 class CircupInstaller(Installer):
     def __init__(
-        self, adapter: Adapter, tracker: Tracker, target_dir: Optional[str], minny_cache_dir: str
+        self,
+        tmgr: TargetManager,
+        tracker: Tracker,
+        target_dir: Optional[str],
+        minny_cache_dir: str,
     ):
-        super().__init__(adapter, tracker, target_dir, minny_cache_dir)
+        super().__init__(tmgr, tracker, target_dir, minny_cache_dir)
         self._cache_dir: str = os.path.join(minny_cache_dir, "circup")
         os.makedirs(self._cache_dir, exist_ok=True)
-        self._target_dir = self._adapter.get_default_target()
+        self._target_dir = self._tmgr.get_default_target()
         logger.debug(f"Circup target dir is {self._target_dir}")
         self._bundle_metas: Optional[Dict[str, Dict[str, Any]]] = None
 
@@ -123,7 +128,7 @@ class CircupInstaller(Installer):
         **kwargs,
     ) -> None:
         self.validate_editables(editables)
-        compiler = Compiler(self._adapter, self._minny_cache_dir, mpy_cross)
+        compiler = Compiler(self._tmgr, self._minny_cache_dir, mpy_cross)
         specs = specs or []
         requirement_files = requirement_files or []
         editables = editables or []
@@ -360,7 +365,7 @@ class CircupInstaller(Installer):
 
             for file_name in files:
                 source_abs_path = os.path.join(root, file_name)
-                target_rel_path = self._adapter.join_path(rel_root, file_name)
+                target_rel_path = self._tmgr.join_path(rel_root, file_name)
                 final_target_rel_path = self._tracker.smart_upload(
                     source_abs_path, target_dir, target_rel_path, compile, compiler
                 )

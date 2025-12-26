@@ -3,15 +3,15 @@ import os.path
 from logging import getLogger
 from typing import Any, Dict, List, Optional, Tuple
 
-from minny.adapters import Adapter
 from minny.circup import CircupInstaller
 from minny.common import UserError
 from minny.compiling import Compiler
-from minny.dir_adapter import DirAdapter
+from minny.dir_target import DirTargetManager
 from minny.installer import Installer
 from minny.mip import MipInstaller
 from minny.pip import PipInstaller
 from minny.settings import load_minny_settings_from_pyproject_toml
+from minny.target import TargetManager
 from minny.tracking import DummyTracker, Tracker
 from minny.util import parse_json_file, parse_toml_file
 
@@ -23,17 +23,17 @@ class ProjectManager:
         self,
         project_dir: str,
         minny_cache_dir: str,
-        adapter: Adapter,
+        tmgr: TargetManager,
         tracker: Tracker,
         compiler: Compiler,
     ):
         self._project_dir = project_dir
         self._lib_dir = os.path.join(self._project_dir, "lib")
-        self._lib_dir_adapter = DirAdapter(self._lib_dir)
+        self._lib_dir_mgr = DirTargetManager(self._lib_dir)
         self._minny_cache_dir = minny_cache_dir
-        self._target_adapter = adapter
+        self._tmgr = tmgr
         self._target_tracker = tracker
-        self._dummy_tracker = DummyTracker(self._lib_dir_adapter)
+        self._dummy_tracker = DummyTracker(self._lib_dir_mgr)
         self._compiler = compiler
         self._pyproject_toml_path = os.path.join(self._project_dir, "pyproject.toml")
         self._pyproject_toml: Optional[Dict[str, Any]] = (
@@ -60,10 +60,10 @@ class ProjectManager:
 
     def run(self, script_path: str, mpy_cross_path: Optional[str], **kwargs):
         self._deploy(mpy_cross_path, except_main=True)
-        # TODO: self._target_adapter.exec()
+        # TODO: self._tmgr.exec()
 
     def _deploy(self, mpy_cross_path: Optional[str], except_main: bool):
-        compiler = Compiler(self._target_adapter, self._minny_cache_dir, mpy_cross_path)
+        compiler = Compiler(self._tmgr, self._minny_cache_dir, mpy_cross_path)
         self._sync_dependencies()
         self._deploy_packages(compiler)
         self._deploy_files(compiler, except_main=False)
@@ -76,7 +76,7 @@ class ProjectManager:
         all_relevant_files = []
         for installer_type in ["pip", "mip", "circup"]:
             installer = self._create_installer(
-                installer_type, self._lib_dir_adapter, self._dummy_tracker
+                installer_type, self._lib_dir_mgr, self._dummy_tracker
             )
 
             # Build specs: minny deps from tool.minny.dependencies.{installer_type}
@@ -112,9 +112,9 @@ class ProjectManager:
         # Remove orphaned files not part of any package
         abs_norm_local_paths_to_keep = [
             os.path.normpath(
-                os.path.normcase(os.path.join(self._lib_dir, abs_adapter_path.lstrip("/")))
+                os.path.normcase(os.path.join(self._lib_dir, abs_mgr_path.lstrip("/")))
             )
-            for abs_adapter_path in all_relevant_files
+            for abs_mgr_path in all_relevant_files
         ]
         logger.debug(f"Keeping paths {abs_norm_local_paths_to_keep}")
         # traverse bottom-up so that dirs becoming empty can be removed
@@ -131,15 +131,15 @@ class ProjectManager:
         for deploy_spec in self._minny_settings.deploy.packages:
             destination = deploy_spec.destination
             if destination == "auto":
-                destination = self._target_adapter.get_default_target()
+                destination = self._tmgr.get_default_target()
             logger.debug(f"Deploying to {destination}")
 
             for installer_type in ["pip", "mip", "circup"]:
                 source_installer = self._create_installer(
-                    installer_type, self._lib_dir_adapter, self._dummy_tracker
+                    installer_type, self._lib_dir_mgr, self._dummy_tracker
                 )
                 target_installer = self._create_installer(
-                    installer_type, self._target_adapter, self._target_tracker, destination
+                    installer_type, self._tmgr, self._target_tracker, destination
                 )
                 synced_packages_infos = source_installer.get_installed_package_infos()
                 synced_package_names = list(synced_packages_infos.keys())
@@ -229,18 +229,18 @@ class ProjectManager:
     def _create_installer(
         self,
         installer_type: str,
-        adapter: Adapter,
+        tmgr: TargetManager,
         tracker: Tracker,
         target_dir: Optional[str] = None,
     ) -> Installer:
         """Create an installer instance of the specified type for the given target."""
         match installer_type:
             case "pip":
-                return PipInstaller(adapter, tracker, target_dir, self._minny_cache_dir)
+                return PipInstaller(tmgr, tracker, target_dir, self._minny_cache_dir)
             case "mip":
-                return MipInstaller(adapter, tracker, target_dir, self._minny_cache_dir)
+                return MipInstaller(tmgr, tracker, target_dir, self._minny_cache_dir)
             case "circup":
-                return CircupInstaller(adapter, tracker, target_dir, self._minny_cache_dir)
+                return CircupInstaller(tmgr, tracker, target_dir, self._minny_cache_dir)
             case _:
                 raise ValueError(f"Unknown installer type: {installer_type}")
 

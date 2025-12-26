@@ -11,14 +11,15 @@ import zlib
 from typing import Any, Dict, List, Optional
 from urllib.request import urlopen
 
-from minny import Adapter, UserError
+from minny.common import UserError
+from minny.target import TargetManager
 
 
 class Compiler:
     def __init__(
-        self, adapter: Adapter, minny_cache_dir: str, mpy_cross_path: Optional[str] = None
+        self, tmgr: TargetManager, minny_cache_dir: str, mpy_cross_path: Optional[str] = None
     ):
-        self._adapter = adapter
+        self._tmgr = tmgr
         self._minny_cache_dir = minny_cache_dir
         self._user_mpy_cross_path = mpy_cross_path
         self._configuration_description: Optional[str] = None
@@ -43,7 +44,7 @@ class Compiler:
         return self._configuration_description
 
     def _get_path_with_options(self) -> List[str]:
-        sys_implementation = self._adapter.get_sys_implementation()
+        sys_implementation = self._tmgr.get_sys_implementation()
         version_prefix = ".".join(sys_implementation["version"].split(".")[:2])
 
         if self._user_mpy_cross_path is not None:

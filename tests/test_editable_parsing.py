@@ -1,9 +1,11 @@
 import tempfile
 
 import pytest
-from minny import Compiler, DummyAdapter, Tracker
 from minny.common import UserError
+from minny.compiling import Compiler
+from minny.dir_target import DummyTargetManager
 from minny.project import ProjectManager, _parse_dependency_specs
+from minny.tracking import Tracker
 
 
 class TestEditableParsing:
@@ -11,11 +13,11 @@ class TestEditableParsing:
 
     def _get_project_manager(self):
         """Create a ProjectManager instance for testing."""
-        adapter = DummyAdapter()
+        tmgr = DummyTargetManager()
         cache_dir = tempfile.mkdtemp()
-        tracker = Tracker(adapter, cache_dir)
-        compiler = Compiler(adapter, cache_dir, None)
-        return ProjectManager("/tmp/test_project", cache_dir, adapter, tracker, compiler)
+        tracker = Tracker(tmgr, cache_dir)
+        compiler = Compiler(tmgr, cache_dir, None)
+        return ProjectManager("/tmp/test_project", cache_dir, tmgr, tracker, compiler)
 
     def test_parse_regular_specs_only(self):
         """Test parsing when all specs are regular (no -e)."""

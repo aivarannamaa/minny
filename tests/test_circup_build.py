@@ -12,7 +12,7 @@ from typing import List
 
 import pytest
 from minny.circup import CircupBuilder, CircupInstaller
-from minny.dir_adapter import DirAdapter
+from minny.dir_target import DirTargetManager
 from minny.tracking import Tracker
 from minny.util import get_latest_github_release_tag
 
@@ -77,10 +77,13 @@ def test_folders_are_equal():
 @pytest.mark.slow
 def test_build_matches_bundle():
     cache_dir = tempfile.mkdtemp()
-    adapter = DirAdapter(cache_dir)
-    tracker = Tracker(adapter, cache_dir)
+    tmgr = DirTargetManager(cache_dir)
+    tracker = Tracker(tmgr, cache_dir)
     c = CircupInstaller(
-        adapter=DirAdapter(cache_dir), tracker=tracker, minny_cache_dir=cache_dir, target_dir=None
+        tmgr=DirTargetManager(cache_dir),
+        tracker=tracker,
+        minny_cache_dir=cache_dir,
+        target_dir=None,
     )
     success = True
     for github_name in c._get_bundle_metas():

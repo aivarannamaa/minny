@@ -5,10 +5,9 @@ import sys
 import traceback
 from typing import List, Optional
 
-from minny.adapters import Adapter, create_adapter
 from minny.common import ManagementError, UserError
 from minny.compiling import Compiler
-from minny.dir_adapter import DummyAdapter
+from minny.target import TargetManager, create_target_manager
 from minny.tracking import Tracker
 from minny.util import find_enclosing_project, get_user_cache_dir
 
@@ -50,29 +49,31 @@ def main(raw_args: Optional[List[str]] = None) -> int:
     args_dict = vars(args)
 
     try:
-        adapter: Adapter
+        tmgr: TargetManager
         if args.main_command in ["cache", "init", "add", "remove", "sync"]:
-            adapter = DummyAdapter()
+            from minny.dir_target import DummyTargetManager
+
+            tmgr = DummyTargetManager()
         else:
-            adapter = create_adapter(**args_dict)
+            tmgr = create_target_manager(**args_dict)
 
         target_dir = args_dict.get("lib_dir", None)
-        tracker = Tracker(adapter, minny_cache_dir=cache_dir)
+        tracker = Tracker(tmgr, minny_cache_dir=cache_dir)
 
         if args.main_command == "circup":
-            command_handler = CircupInstaller(adapter, tracker, target_dir, cache_dir)
+            command_handler = CircupInstaller(tmgr, tracker, target_dir, cache_dir)
             method = getattr(command_handler, args.command)
         elif args.main_command == "mip":
-            command_handler = MipInstaller(adapter, tracker, target_dir, cache_dir)
+            command_handler = MipInstaller(tmgr, tracker, target_dir, cache_dir)
             method = getattr(command_handler, args.command)
         elif args.main_command == "pip":
-            command_handler = PipInstaller(adapter, tracker, target_dir, cache_dir)
+            command_handler = PipInstaller(tmgr, tracker, target_dir, cache_dir)
             method = getattr(command_handler, args.command)
         else:
             project_dir = args.project or find_enclosing_project()
             assert project_dir is not None
-            compiler = Compiler(adapter, cache_dir, args_dict.get("mpy_cross", None))
-            command_handler = ProjectManager(project_dir, cache_dir, adapter, tracker, compiler)
+            compiler = Compiler(tmgr, cache_dir, args_dict.get("mpy_cross", None))
+            command_handler = ProjectManager(project_dir, cache_dir, tmgr, tracker, compiler)
             method = getattr(command_handler, args.main_command)
 
         method(**args_dict)

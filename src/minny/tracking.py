@@ -5,8 +5,8 @@ import zlib
 from logging import getLogger
 from typing import Dict, List, NotRequired, Optional, TypedDict
 
-from minny import Adapter
 from minny.compiling import Compiler
+from minny.target import TargetManager
 from minny.util import parse_json_file
 
 logger = getLogger(__name__)
@@ -29,8 +29,8 @@ SingleInstallerTrackedPackages = Dict[str, TrackedPackageInfo]  # key is package
 
 
 class Tracker:
-    def __init__(self, adapter: Adapter, minny_cache_dir: str):
-        self._adapter = adapter
+    def __init__(self, tmgr: TargetManager, minny_cache_dir: str):
+        self._tmgr = tmgr
         self._minny_cache_dir = minny_cache_dir
         self._tracked_files: Dict[str, TrackedFileInfo] = {}  # key is target path
         self._tracked_packages_by_installer: Dict[
@@ -63,12 +63,12 @@ class Tracker:
             )
 
     def _get_device_state_path(self) -> str:
-        device_id = self._adapter.get_device_id()
+        device_id = self._tmgr.get_device_id()
         safe_device_id = re.sub(r"[:/\\]+", "_", device_id)
         return os.path.join(self._minny_cache_dir, "devices", safe_device_id + ".json")
 
     def remove_file_if_exists(self, path: str) -> None:
-        self._adapter.remove_file_if_exists(path)
+        self._tmgr.remove_file_if_exists(path)
         if path in self._tracked_files:
             del self._tracked_files[path]
 
@@ -89,7 +89,7 @@ class Tracker:
             else:
                 module_format = "py"
 
-        target_path = self._adapter.join_path(target_base_path, target_rel_path)
+        target_path = self._tmgr.join_path(target_base_path, target_rel_path)
 
         file_info = None if force else self._tracked_files.get(target_path, None)
         source_mtime = os.stat(source_abs_path).st_mtime
@@ -132,14 +132,14 @@ class Tracker:
             logger.debug(f"Skip writing '{target_path}' (recorded crc32 not changed)")
             return
 
-        checked_crc32 = self._adapter.try_get_crc32(target_path)
+        checked_crc32 = self._tmgr.try_get_crc32(target_path)
         if checked_crc32 == source_crc32:
             logger.debug(f"Skip writing '{target_path}' (checked crc32 not changed)")
         else:
             logger.info(
                 f"Writing {len(content)} bytes to '{target_path}' (checked crc32={checked_crc32}"
             )
-            self._adapter.write_file(target_path, content)
+            self._tmgr.write_file(target_path, content)
 
         self._tracked_files[target_path] = TrackedFileInfo(crc32=source_crc32)
 
@@ -191,8 +191,8 @@ class Tracker:
 
 
 class DummyTracker(Tracker):
-    def __init__(self, adapter: Adapter):
-        super().__init__(adapter, "dummy")
+    def __init__(self, tmgr: TargetManager):
+        super().__init__(tmgr, "dummy")
 
     def _save_tracking_info(self) -> None:
         pass

@@ -1,10 +1,10 @@
 import os.path
 from abc import ABC
 
-from minny import Adapter
+from minny.target import TargetManager
 
 
-class OsAdapter(Adapter, ABC):
+class OsTargetManager(TargetManager, ABC):
     def __init__(self, executable: str):
         super().__init__()
         self._executable = executable
@@ -13,7 +13,7 @@ class OsAdapter(Adapter, ABC):
         return os.path.sep
 
 
-class LocalAdapter(OsAdapter): ...
+class LocalOsTargetManager(OsTargetManager): ...
 
 
-class SshAdapter(OsAdapter): ...
+class SshOsTargetManager(OsTargetManager): ...

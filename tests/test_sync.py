@@ -2,8 +2,10 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from minny import Compiler, DummyAdapter, Tracker
+from minny.compiling import Compiler
+from minny.dir_target import DummyTargetManager
 from minny.project import ProjectManager
+from minny.tracking import Tracker
 
 # Test constants
 DUMMY_FILES = [
@@ -45,10 +47,10 @@ def test_sync_command(snapshot):
     conflicting_file.write_text(CONFLICTING_DUMMY_CONTENT)
 
     cache_dir = tempfile.mkdtemp()
-    adapter = DummyAdapter()
-    compiler = Compiler(adapter, cache_dir, None)
-    tracker = Tracker(adapter, minny_cache_dir=cache_dir)
-    project_manager = ProjectManager(str(project_dir), cache_dir, adapter, tracker, compiler)
+    tmgr = DummyTargetManager()
+    compiler = Compiler(tmgr, cache_dir, None)
+    tracker = Tracker(tmgr, minny_cache_dir=cache_dir)
+    project_manager = ProjectManager(str(project_dir), cache_dir, tmgr, tracker, compiler)
     project_manager.sync()
 
     # Verify lib directory was created
