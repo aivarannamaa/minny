@@ -8,9 +8,7 @@ version = "0.0.1a2"
 dependencies = [
     "packaging",
     "pyserial",
-    "filelock",
     "websockets",
-    "mpy-cross-v6.3"
 ]
 requires-python = ">=3.11"
 authors = [
@@ -55,17 +53,12 @@ search-path = ["src", "tests"]
 
 [dependency-groups]
 dev = [
-  "pytest>=8.4.1",
-  "syrupy",
-  "ruff>=0.12.9",
-  "ty>=0.0.1a19",
-  "pyrefly>=0.29.0",
-]
-typeshed = [
-    "micropython-typeshed>=0.1.0",
-]
-typings = [
-    "micropython-rp2-stubs>=1.25.0.post3",
+    "pytest>=8.4.1",
+    "syrupy",
+    "ruff>=0.12.9",
+    "ty>=0.0.1a19",
+    "pyrefly>=0.29.0",
+    "types-pyserial"
 ]
 
 [tool.pytest.ini_options]
