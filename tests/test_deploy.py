@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Dict
 
 from minny import Compiler, Tracker
-from minny.adapters import DirAdapter
+from minny.dir_adapter import DirAdapter
 from minny.project import ProjectManager
 from tutils import create_dir_snapshot, get_tests_cache_dir
 

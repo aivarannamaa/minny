@@ -11,8 +11,8 @@ from logging import getLogger
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from minny.adapters import DirAdapter
 from minny.compiling import Compiler
+from minny.dir_adapter import DirAdapter
 from minny.installer import META_ENCODING, EditableInfo, Installer, PackageMetadata
 from minny.pyproject_analyzer import collect_editable_package_metadata_from_pip_compatible_project
 from minny.util import (

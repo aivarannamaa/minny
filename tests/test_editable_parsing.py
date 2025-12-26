@@ -1,8 +1,7 @@
 import tempfile
 
 import pytest
-from minny import Compiler, Tracker
-from minny.adapters import DummyAdapter
+from minny import Compiler, DummyAdapter, Tracker
 from minny.common import UserError
 from minny.project import ProjectManager, _parse_dependency_specs
 

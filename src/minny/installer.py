@@ -7,8 +7,9 @@ from logging import getLogger
 from typing import Dict, List, NotRequired, Optional, TypedDict
 
 from minny import UserError
-from minny.adapters import Adapter, DirAdapter
+from minny.adapters import Adapter
 from minny.compiling import Compiler
+from minny.dir_adapter import DirAdapter
 from minny.tracking import TrackedPackageInfo, Tracker
 from minny.util import parse_editable_spec, read_requirements_from_txt_file
 from packaging.requirements import Requirement

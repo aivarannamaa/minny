@@ -3,8 +3,8 @@ import shutil
 import tempfile
 from typing import Dict
 
-from minny.adapters import DirAdapter
 from minny.circup import CircupInstaller
+from minny.dir_adapter import DirAdapter
 from minny.tracking import Tracker
 from tutils import create_dir_snapshot
 

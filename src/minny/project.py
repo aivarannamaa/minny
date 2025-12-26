@@ -3,10 +3,11 @@ import os.path
 from logging import getLogger
 from typing import Any, Dict, List, Optional, Tuple
 
-from minny.adapters import Adapter, DirAdapter
+from minny.adapters import Adapter
 from minny.circup import CircupInstaller
 from minny.common import UserError
 from minny.compiling import Compiler
+from minny.dir_adapter import DirAdapter
 from minny.installer import Installer
 from minny.mip import MipInstaller
 from minny.pip import PipInstaller

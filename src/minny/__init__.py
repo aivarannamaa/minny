@@ -5,9 +5,10 @@ import sys
 import traceback
 from typing import List, Optional
 
-from minny.adapters import Adapter, DummyAdapter, create_adapter
+from minny.adapters import Adapter, create_adapter
 from minny.common import ManagementError, UserError
 from minny.compiling import Compiler
+from minny.dir_adapter import DummyAdapter
 from minny.tracking import Tracker
 from minny.util import find_enclosing_project, get_user_cache_dir
 

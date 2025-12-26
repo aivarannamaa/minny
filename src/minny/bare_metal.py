@@ -11,7 +11,7 @@ from textwrap import dedent
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from minny import UserError
-from minny.adapters import BaseAdapter
+from minny.adapters import Adapter
 from minny.common import CommunicationError, ManagementError, ProtocolError
 from minny.connection import MicroPythonConnection
 from minny.serial_connection import SerialConnection
@@ -65,7 +65,7 @@ TRACEBACK_MARKER = b"Traceback (most recent call last):"
 OutputConsumer = Callable[[str, str], None]
 
 
-class BareMetalAdapter(BaseAdapter, ABC):
+class BareMetalAdapter(Adapter, ABC):
     def __init__(
         self,
         connection: MicroPythonConnection,

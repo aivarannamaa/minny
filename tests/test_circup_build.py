@@ -11,8 +11,8 @@ from logging import getLogger
 from typing import List
 
 import pytest
-from minny.adapters import DirAdapter
 from minny.circup import CircupBuilder, CircupInstaller
+from minny.dir_adapter import DirAdapter
 from minny.tracking import Tracker
 from minny.util import get_latest_github_release_tag
 
