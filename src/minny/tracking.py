@@ -139,7 +139,7 @@ class Tracker:
             logger.info(
                 f"Writing {len(content)} bytes to '{target_path}' (checked crc32={checked_crc32}"
             )
-            self._tmgr.write_file(target_path, content)
+            self._tmgr.ensure_dir_and_write_file(target_path, content)
 
         self._tracked_files[target_path] = TrackedFileInfo(crc32=source_crc32)
 

@@ -1,8 +1,9 @@
 import os.path
 import tempfile
+import threading
 import zlib
 from logging import getLogger
-from typing import Any, Dict, List, Optional
+from typing import Any, BinaryIO, Callable, Dict, List, Optional
 
 from minny.target import TargetManager, UserError
 
@@ -34,30 +35,45 @@ class DirTargetManager(TargetManager):
         with open(path, "rb") as fp:
             return zlib.crc32(fp.read())
 
-    def read_file(self, path: str) -> bytes:
-        local_path = self.convert_to_local_path(path)
+    def read_file_ex(
+        self,
+        source_path: str,
+        target_fp: BinaryIO,
+        callback: Callable[[int, int], None],
+        interrupt_event: threading.Event,
+    ) -> int:
+        local_path = self.convert_to_local_path(source_path)
+        block_size = self._get_file_operation_block_size() * 4
+        file_size = os.path.getsize(local_path)
+
+        read_bytes = 0
+
         with open(local_path, "rb") as fp:
-            return fp.read()
+            while True:
+                if interrupt_event.is_set():
+                    raise InterruptedError()
+                block = fp.read(block_size)
+                if not block:
+                    break
+                target_fp.write(block)
+                read_bytes += len(block)
+                callback(read_bytes, file_size)
 
-    def write_file_in_existing_dir(self, path: str, content: bytes) -> None:
+        return read_bytes
+
+    def write_file_ex(
+        self, path: str, source_fp: BinaryIO, file_size: int, callback: Callable[[int, int], None]
+    ) -> int:
         local_path = self.convert_to_local_path(path)
-        assert not os.path.isdir(local_path)
-        logger.debug(f"Writing to {local_path}")
+        return self._write_local_file_ex(local_path, source_fp, file_size, callback)
 
-        block_size = 4 * 1024
-        with open(local_path, "wb") as fp:
-            while content:
-                block = content[:block_size]
-                content = content[block_size:]
-                bytes_written = fp.write(block)
-                fp.flush()
-                os.fsync(fp)
-                assert bytes_written == len(block)
-
-    def remove_file_if_exists(self, path: str) -> None:
+    def remove_file_if_exists(self, path: str) -> bool:
         local_path = self.convert_to_local_path(path)
         if os.path.exists(local_path):
             os.remove(local_path)
+            return True
+        else:
+            return False
 
     def remove_dir_if_empty(self, path: str) -> bool:
         local_path = self.convert_to_local_path(path)
@@ -95,12 +111,10 @@ class DirTargetManager(TargetManager):
     def get_device_id(self) -> str:
         return f"file://{self.base_path}"
 
-    def fetch_sys_path(self) -> List[str]:
-        # This means, list command without --path will consider this directory
+    def get_sys_path(self) -> List[str]:
         return ["/"]
 
-    def fetch_sys_implementation(self) -> Dict[str, Any]:
-        # TODO:
+    def get_sys_implementation(self) -> Dict[str, Any]:
         return {"name": "micropython", "version": "1.27", "_mpy": None}
 
     def get_default_target(self) -> str:

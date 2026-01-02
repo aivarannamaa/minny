@@ -9,7 +9,7 @@ import urllib.request
 from dataclasses import dataclass
 from logging import getLogger
 from pathlib import Path
-from typing import Any, List, Optional, Set, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
 
 import packaging.version
 from packaging.utils import canonicalize_name
@@ -184,8 +184,8 @@ def custom_normalize_dist_name(name: str) -> str:
     return normalize_name(name).lower().replace("-", "_")
 
 
-def list_volumes(skip_letters: Optional[Set[str]] = None) -> List[str]:
-    skip_letters = skip_letters or set()
+def list_volumes() -> List[str]:
+    skip_letters = {"A"}  # can be slow to query
 
     "Adapted from https://github.com/ntoll/uflash/blob/master/uflash.py"
     if sys.platform == "win32":
@@ -347,3 +347,47 @@ def parse_editable_spec(spec: str) -> Tuple[Optional[str], str]:
         return parts[0].strip(), parts[1].strip()
     else:
         return None, spec.strip()
+
+
+def find_volumes_by_name(volume_name: str) -> Sequence[str]:
+    volumes = list_volumes()
+    if os.name == "nt":
+        return [
+            volume
+            for volume in volumes
+            if get_win_volume_name(volume).upper() == volume_name.upper()
+        ]
+    else:
+        return [volume for volume in volumes if volume.endswith(volume_name)]
+
+
+def get_win_volume_name(path: str) -> str:
+    """
+    Each disk or external device connected to windows has an attribute
+    called "volume name". This function returns the volume name for
+    the given disk/device.
+    Code from http://stackoverflow.com/a/12056414
+    """
+    if sys.platform == "win32":
+        import ctypes
+
+        vol_name_buf = ctypes.create_unicode_buffer(1024)
+        ctypes.windll.kernel32.GetVolumeInformationW(  # @UndefinedVariable
+            ctypes.c_wchar_p(path),
+            vol_name_buf,
+            ctypes.sizeof(vol_name_buf),
+            None,
+            None,
+            None,
+            None,
+            0,
+        )
+        assert isinstance(vol_name_buf.value, str)
+        return vol_name_buf.value
+    else:
+        raise RuntimeError("Only meant for Windows")
+
+
+def try_sync_local_filesystem():
+    if hasattr(os, "sync"):
+        os.sync()

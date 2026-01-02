@@ -1,49 +1,22 @@
-import ast
-import binascii
-import errno
 import os
-import re
 import struct
+import threading
 import time
-from abc import ABC
 from logging import getLogger
-from textwrap import dedent
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from textwrap import dedent, indent
+from typing import BinaryIO, Callable, Tuple, Union
 
-from minny.common import CommunicationError, ManagementError, ProtocolError, UserError
-from minny.connection import MicroPythonConnection
-from minny.serial_connection import SerialConnection
-from minny.target import TargetManager
-from minny.util import starts_with_continuation_byte
+from minny.common import ManagementError
+from minny.target import (
+    OK,
+    SOFT_REBOOT_CMD,
+    Y2000_EPOCH_OFFSET,
+    ProperTargetManager,
+    ReadOnlyFilesystemError,
+)
+from minny.util import find_volumes_by_name, is_continuation_byte, try_sync_local_filesystem
 
 logger = getLogger(__name__)
-
-RAW_MODE_CMD = b"\x01"
-NORMAL_MODE_CMD = b"\x02"
-INTERRUPT_CMD = b"\x03"
-SOFT_REBOOT_CMD = b"\x04"
-PASTE_MODE_CMD = b"\x05"
-PASTE_MODE_LINE_PREFIX = b"=== "
-
-PASTE_SUBMIT_MODE = "paste"
-RAW_PASTE_SUBMIT_MODE = "raw_paste"
-RAW_SUBMIT_MODE = "raw"
-
-RAW_PASTE_COMMAND = b"\x05A\x01"
-RAW_PASTE_CONFIRMATION = b"R\x01"
-RAW_PASTE_CONTINUE = b"\x01"
-
-MGMT_VALUE_START = b"<minny>"
-MGMT_VALUE_END = b"</minny>"
-
-# How many seconds to wait for something that should appear quickly.
-# In other words -- how long to wait with reporting a protocol error
-# (hoping that the required piece is still coming)
-WAIT_OR_CRASH_TIMEOUT = 5
-
-FIRST_RAW_PROMPT = b"raw REPL; CTRL-B to exit\r\n>"
-
-RAW_PROMPT = b">"
 
 
 WEBREPL_REQ_S = "<2sBBQLH64s"
@@ -51,266 +24,437 @@ WEBREPL_PUT_FILE = 1
 WEBREPL_GET_FILE = 2
 
 
-EOT = b"\x04"
-NORMAL_PROMPT = b">>> "
-LF = b"\n"
-OK = b"OK"
-ESC = b"\x1b"
-ST = b"\x1b\\"
+_CP_ENTER_REPL_PHRASES = [
+    "Press any key to enter the REPL. Use CTRL-D to reload.",
+    "Appuyez sur n'importe quelle touche pour utiliser le REPL. Utilisez CTRL-D pour relancer.",
+    "Presiona cualquier tecla para entrar al REPL. Usa CTRL-D para recargar.",
+    "Drücke eine beliebige Taste um REPL zu betreten. Drücke STRG-D zum neuladen.",
+    "Druk een willekeurige toets om de REPL te starten. Gebruik CTRL+D om te herstarten.",
+    "àn rèn hé jiàn jìn rù REPL. shǐ yòng CTRL-D zhòng xīn jiā zǎi ."
+    "Tekan sembarang tombol untuk masuk ke REPL. Tekan CTRL-D untuk memuat ulang.",
+    "Pressione qualquer tecla para entrar no REPL. Use CTRL-D para recarregar.",
+    "Tryck på valfri tangent för att gå in i REPL. Använd CTRL-D för att ladda om.",
+    "Нажмите любую клавишу чтобы зайти в REPL. Используйте CTRL-D для перезагрузки.",
+]
 
-ENCODING = "utf-8"
-TRACEBACK_MARKER = b"Traceback (most recent call last):"
+_CP_AUTO_RELOAD_PHRASES = [
+    "Auto-reload is on. Simply save files over USB to run them or enter REPL to disable.",
+    "Auto-chargement activé. Copiez ou sauvegardez les fichiers via USB pour les lancer ou démarrez le REPL pour le désactiver.",
+    "Auto-reload habilitado. Simplemente guarda los archivos via USB para ejecutarlos o entra al REPL para desabilitarlos.",
+    "Automatisches Neuladen ist aktiv. Speichere Dateien über USB um sie auszuführen oder verbinde dich mit der REPL zum Deaktivieren.",
+    "L'auto-reload è attivo. Salva i file su USB per eseguirli o entra nel REPL per disabilitarlo.",
+    "Auto-reload be on. Put yer files on USB to weigh anchor, er' bring'er about t' the REPL t' scuttle.",
+    "Auto-herlaad staat aan. Sla bestanden simpelweg op over USB om uit te voeren of start REPL om uit te schakelen.",
+    "Ang awtomatikong pag re-reload ay ON. i-save lamang ang mga files sa USB para patakbuhin sila o pasukin ang REPL para i-disable ito.",
+    "Zìdòng chóngxīn jiāzài. Zhǐ xū tōngguò USB bǎocún wénjiàn lái yùnxíng tāmen huò shūrù REPL jìnyòng.",
+    "Auto-reload aktif. Silahkan simpan data-data (files) melalui USB untuk menjalankannya atau masuk ke REPL untukmenonaktifkan.",
+    "Samo-przeładowywanie włączone. Po prostu zapisz pliki przez USB aby je uruchomić, albo wejdź w konsolę aby wyłączyć.",
+    "O recarregamento automático está ativo. Simplesmente salve os arquivos via USB para executá-los ou digite REPL para desativar.",
+    "Autoladdning är på. Spara filer via USB för att köra dem eller ange REPL för att inaktivera.",
+    "Автоматическая перезагрузка включена. Просто сохрани файл по USB или зайди в REPL чтобы отключить.",
+]
 
-OutputConsumer = Callable[[str, str], None]
 
+class BareMetalTargetManager(ProperTargetManager):
+    def _get_helper_code(self):
+        if self._using_simplified_micropython():
+            return super()._get_helper_code()
 
-class BareMetalTargetManager(TargetManager, ABC):
-    def __init__(
+        result = super()._get_helper_code()
+
+        # Provide unified interface with Unix variant, which has anemic uos
+        result += indent(
+            dedent(
+                """
+            @builtins.classmethod
+            def getcwd(cls):
+                return cls.os.getcwd()
+
+            @builtins.classmethod
+            def chdir(cls, x):
+                return cls.os.chdir(x)
+
+            @builtins.classmethod
+            def rmdir(cls, x):
+                return cls.os.rmdir(x)
+        """
+            ),
+            "    ",
+        )
+
+        return result
+
+    def _resolve_unknown_epoch(self) -> int:
+        if self._connected_to_circuitpython() or self._connected_to_pycom():
+            return 1970
+        else:
+            return 2000
+
+    def sync_rtc(self) -> None:
+        """Sets the time to match the time on the host."""
+
+        now = self._get_time_for_rtc()
+
+        if self._using_simplified_micropython():
+            return
+        elif self._connected_to_circuitpython():
+            if "rtc" not in self._builtin_modules:
+                logger.warning("Can't sync time as 'rtc' module is missing")
+                return
+
+            specific_script = dedent(
+                """
+                from rtc import RTC as __thonny_RTC
+                __thonny_RTC().datetime = {ts}
+                del __thonny_RTC
+            """
+            ).format(ts=tuple(now))
+        else:
+            # RTC.init is used in PyCom, RTC.datetime is used by the rest
+            specific_script = dedent(
+                """
+                from machine import RTC as __thonny_RTC
+                try:
+                    __thonny_RTC().datetime({datetime_ts})
+                except:
+                    __thonny_RTC().init({init_ts})
+                finally:
+                    del __thonny_RTC
+
+            """
+            ).format(
+                datetime_ts=(
+                    now.tm_year,
+                    now.tm_mon,
+                    now.tm_mday,
+                    now.tm_wday,
+                    now.tm_hour,
+                    now.tm_min,
+                    now.tm_sec,
+                    0,
+                ),
+                init_ts=tuple(now)[:6] + (0, 0),
+            )
+
+        script = dedent(
+            """
+                try:
+                %s
+                    __thonny_helper.print_mgmt_value(True)
+                except __thonny_helper.builtins.Exception as e:
+                    __thonny_helper.print_mgmt_value(__thonny_helper.builtins.str(e))
+            """
+        ) % indent(specific_script, "    ")
+
+        val = self._evaluate(script)
+        if isinstance(val, str):
+            print("WARNING: Could not sync device's clock: " + val)
+
+    def _get_utc_timetuple_from_device(
         self,
-        connection: MicroPythonConnection,
-        submit_mode: Optional[str] = None,
-        write_block_size: Optional[int] = None,
-        write_block_delay: Optional[float] = None,
-    ):
-        super().__init__()
-        self._connection = connection
-        (
-            self._submit_mode,
-            self._write_block_size,
-            self._write_block_delay,
-        ) = self._infer_submit_parameters(submit_mode, write_block_size, write_block_delay)
-        self._last_prompt: Optional[bytes] = None
+    ) -> Union[Tuple[int, ...], str]:
+        if self._using_simplified_micropython():
+            return "This device does not have a real-time clock"
+        elif self._connected_to_circuitpython():
+            specific_script = dedent(
+                """
+                from rtc import RTC as __thonny_RTC
+                __thonny_helper.print_mgmt_value(__thonny_helper.builtins.tuple(__thonny_RTC().datetime)[:6])
+                del __thonny_RTC
+                """
+            )
+        else:
+            specific_script = dedent(
+                """
+                from machine import RTC as __thonny_RTC
+                try:
+                    # now() on some devices also gives weekday, so prefer datetime
+                    __thonny_temp = __thonny_helper.builtins.tuple(__thonny_RTC().datetime())
+                    # remove weekday from index 3
+                    __thonny_helper.print_mgmt_value(__thonny_temp[0:3] + __thonny_temp[4:7])
+                    del __thonny_temp
+                except:
+                    __thonny_helper.print_mgmt_value(__thonny_helper.builtins.tuple(__thonny_RTC().now())[:6])
+                del __thonny_RTC
+                """
+            )
 
-        self._interrupt_to_prompt()
-        self._prepare_helper()
-        self._builtin_modules = self._fetch_builtin_modules()
-        logger.debug("Builtin modules: %r", self._builtin_modules)
+        script = dedent(
+            """
+                try:
+                %s
+                except __thonny_helper.builtins.Exception as e:
+                    __thonny_helper.print_mgmt_value(__thonny_helper.builtins.str(e))
+            """
+        ) % indent(specific_script, "    ")
+
+        val = self._evaluate(script)
+        return val
+
+    def _get_actual_time_tuple_on_device(self):
+        script = dedent(
+            """
+            try:
+                try:
+                    from time import localtime as __thonny_localtime
+                    __thonny_helper.print_mgmt_value(__thonny_helper.builtins.tuple(__thonny_localtime()))
+                    del __thonny_localtime
+                except:
+                    # some CP boards
+                    from rtc import RTC as __thonny_RTC
+                    __thonny_helper.print_mgmt_value(__thonny_helper.builtins.tuple(__thonny_RTC().datetime))
+                    del __thonny_RTC
+            except __thonny_helper.builtins.Exception as e:
+                __thonny_helper.print_mgmt_value(__thonny_helper.builtins.str(e))
+        """
+        )
+
+        return self._evaluate(script)
+
+    def _restart_interpreter(self):
+        # TODO: review
+        if self._connected_to_circuitpython():
+            """
+            CP runs code.py after soft-reboot even in raw repl.
+            At the same time, it re-initializes VM and hardware just by switching
+            between raw and friendly REPL (tested in CP 6.3 and 7.1)
+            """
+            logger.info("Creating fresh REPL for CP")
+            self._ensure_normal_mode()
+            self._ensure_raw_mode()
+        else:
+            """NB! assumes prompt and may be called without __thonny_helper"""
+            logger.info("_create_fresh_repl")
+            self._ensure_raw_mode()
+            self._write(SOFT_REBOOT_CMD)
+            assuming_ok = self._connection.soft_read(2, timeout=0.1)
+            if assuming_ok != OK:
+                logger.warning("Got %r after requesting soft reboot")
+            self._check_reconnect()
+            self._forward_output_until_active_prompt()
+            logger.info("Done _create_fresh_repl")
+
+    def _check_reconnect(self):
+        if self._connected_over_webrepl():
+            from minny.webrepl_connection import WebReplConnection
+
+            assert isinstance(self._connection, WebReplConnection)
+            time.sleep(1)
+            logger.info("Reconnecting to WebREPL")
+            self._connection = self._connection.close_and_return_new_connection()
+
+    def _connected_over_webrepl(self):
+        from minny.webrepl_connection import WebReplConnection
+
+        return isinstance(self._connection, WebReplConnection)
+
+    def delete_recursively(self, paths):
+        if not self._supports_directories():
+            # micro:bit
+            self._execute_without_output(
+                dedent(
+                    """
+                for __thonny_path in %r: 
+                    __thonny_helper.os.remove(__thonny_path)
+
+                del __thonny_path
+
+            """
+                )
+                % paths
+            )
+        else:
+            if self._read_only_filesystem:
+                self._delete_recursively_via_mount(paths)
+            else:
+                try:
+                    self._delete_recursively_via_repl(paths)
+                except ManagementError as e:
+                    if self._contains_read_only_error(e.out + e.err):
+                        self._read_only_filesystem = True
+                        self._delete_recursively_via_mount(paths)
+                    else:
+                        raise
+
+            self._sync_remote_filesystem()
+
+    def _internal_path_to_mounted_path(self, path: str) -> str:
+        mount_path = self._get_fs_mount()
+        assert mount_path is not None
+
+        flash_prefix = self._get_flash_prefix()
+        assert path.startswith(flash_prefix)
+
+        path_suffix = path[len(flash_prefix) :]
+
+        return os.path.join(mount_path, os.path.normpath(path_suffix))
+
+    def read_file_ex(
+        self,
+        source_path: str,
+        target_fp: BinaryIO,
+        callback: Callable[[int, int], None],
+        interrupt_event: threading.Event,
+    ) -> int:
+        start_time = time.time()
+
+        if self._connected_over_webrepl():
+            size = self._read_file_via_webrepl_file_protocol(source_path, target_fp, callback)
+        else:
+            # TODO: Is it better to read from mount when possible? Is the mount up to date when the file
+            # is written via serial? Does the MP API give up to date bytes when the file is written via mount?
+            size = self._read_file_via_repl(source_path, target_fp, callback, interrupt_event)
+
+        logger.info("Read %s in %.1f seconds", source_path, time.time() - start_time)
+        return size
+
+    def _read_file_via_webrepl_file_protocol(
+        self, source_path: str, target_fp: BinaryIO, callback: Callable[[int, int], None]
+    ) -> int:
+        """
+        Adapted from https://github.com/micropython/webrepl/blob/master/webrepl_cli.py
+        """
+        assert self._connected_over_webrepl()
+
+        file_size = self._get_file_size(source_path)
+
+        src_fname = source_path.encode("utf-8")
+        rec = struct.pack(
+            WEBREPL_REQ_S, b"WA", WEBREPL_GET_FILE, 0, 0, 0, len(src_fname), src_fname
+        )
+        self._connection.set_text_mode(False)
+        try:
+            self._write(rec)
+            assert self._read_websocket_response() == 0
+
+            bytes_read = 0
+            callback(bytes_read, file_size)
+            while True:
+                # report ready
+                self._write(b"\0")
+
+                (block_size,) = struct.unpack("<H", self._connection.read(2))
+                if block_size == 0:
+                    break
+                while block_size:
+                    buf = self._connection.read(block_size)
+                    if not buf:
+                        raise OSError("Could not read in WebREPL binary protocol")
+                    bytes_read += len(buf)
+                    target_fp.write(buf)
+                    block_size -= len(buf)
+                    callback(bytes_read, file_size)
+
+            assert self._read_websocket_response() == 0
+        finally:
+            self._connection.set_text_mode(True)
+
+        return bytes_read
+
+    def write_file_ex(
+        self, path: str, source_fp: BinaryIO, file_size: int, callback: Callable[[int, int], None]
+    ) -> int:
+        start_time = time.time()
+
+        if self._connected_over_webrepl():
+            result = self._write_file_via_webrepl_file_protocol(
+                path, source_fp, file_size, callback
+            )
+        elif self._read_only_filesystem:
+            result = self._write_file_via_mount(path, source_fp, file_size, callback)
+        else:
+            try:
+                result = self._write_file_via_repl(path, source_fp, file_size, callback)
+            except ReadOnlyFilesystemError:
+                self._read_only_filesystem = True
+                result = self._write_file_via_mount(path, source_fp, file_size, callback)
+
+        logger.info("Wrote %s in %.1f seconds", path, time.time() - start_time)
+        return result
+
+    def _write_file_via_mount(
+        self,
+        path: str,
+        source: BinaryIO,
+        file_size: int,
+        callback: Callable[[int, int], None],
+    ) -> int:
+        mounted_target_path = self._internal_path_to_mounted_path(path)
+        return self._write_local_file_ex(mounted_target_path, source, file_size, callback)
+
+    def _write_file_via_webrepl_file_protocol(
+        self,
+        target_path: str,
+        source: BinaryIO,
+        file_size: int,
+        callback: Callable[[int, int], None],
+    ) -> int:
+        """
+        Adapted from https://github.com/micropython/webrepl/blob/master/webrepl_cli.py
+        """
+        assert self._connected_over_webrepl()
+
+        dest_fname = target_path.encode("utf-8")
+        rec = struct.pack(
+            WEBREPL_REQ_S, b"WA", WEBREPL_PUT_FILE, 0, 0, file_size, len(dest_fname), dest_fname
+        )
+        self._connection.set_text_mode(False)
+        bytes_sent = 0
+        try:
+            self._write(rec[:10])
+            self._write(rec[10:])
+            assert self._read_websocket_response() == 0
+
+            callback(bytes_sent, file_size)
+            while True:
+                block = source.read(1024)
+                if not block:
+                    break
+                self._write(block)
+                bytes_sent += len(block)
+                callback(bytes_sent, file_size)
+
+            assert self._read_websocket_response() == 0
+        finally:
+            self._connection.set_text_mode(True)
+
+        return bytes_sent
+
+    def _read_websocket_response(self):
+        data = self._connection.read(4)
+        sig, code = struct.unpack("<2sH", data)
+        assert sig == b"WB"
+        return code
+
+    def _sync_remote_filesystem(self):
+        self._execute_without_output(
+            dedent(
+                """
+            if __thonny_helper.builtins.hasattr(__thonny_helper.os, "sync"):
+                __thonny_helper.os.sync()        
+        """
+            )
+        )
 
     def get_dir_sep(self) -> str:
         return "/"
 
-    def get_device_id(self) -> str:
-        # TODO
-        raise NotImplementedError()
+    def _mkdir(self, path):
+        if path == "/":
+            return
 
-    def _infer_submit_parameters(
-        self,
-        submit_mode: Optional[str] = None,
-        write_block_size: Optional[int] = None,
-        write_block_delay: Optional[float] = None,
-    ) -> Tuple[str, int, float]:
-        if submit_mode is None:
-            submit_mode = RAW_PASTE_SUBMIT_MODE
-
-        if write_block_size is None:
-            write_block_size = 255
-
-        if write_block_delay is None:
-            if submit_mode == RAW_SUBMIT_MODE:
-                write_block_delay = 0.01
+        try:
+            super()._mkdir(path)
+        except ManagementError as e:
+            if self._contains_read_only_error(e.err):
+                self._makedirs_via_mount(path)
             else:
-                write_block_delay = 0.0
+                raise
 
-        return submit_mode, write_block_size, write_block_delay
-
-    def _fetch_builtin_modules(self) -> List[str]:
-        script = "__minny_helper.builtins.help('modules')"
-        out, err = self._execute_and_capture_output(script)
-        if err or not out:
-            logger.warning("Could not query builtin modules")
-            return []
-
-        modules_str_lines = out.strip().splitlines()
-
-        last_line = modules_str_lines[-1].strip()
-        if last_line.count(" ") > 0 and "  " not in last_line and "\t" not in last_line:
-            # probably something like "plus any modules on the filesystem"
-            # (can be in different languages)
-            modules_str_lines = modules_str_lines[:-1]
-
-        modules_str = (
-            " ".join(modules_str_lines)
-            .replace("/__init__", "")
-            .replace("__main__", "")
-            .replace("/", ".")
-        )
-
-        return modules_str.split()
-
-    def _interrupt_to_prompt(self) -> None:
-        # It's safer to thoroughly interrupt before poking with RAW_MODE_CMD
-        # as Pico may get stuck otherwise
-        # https://github.com/micropython/micropython/issues/7867
-        interventions = [(INTERRUPT_CMD, 0.1), (INTERRUPT_CMD, 0.1), (RAW_MODE_CMD, 0.1)]
-
-        for cmd, timeout in interventions:
-            self._write(cmd)
-            try:
-                self._log_output_until_active_prompt(timeout=timeout)
-                break
-            except TimeoutError as e:
-                logger.debug(
-                    "Could not get prompt with intervention %r and timeout %r. Read bytes: %r",
-                    cmd,
-                    timeout,
-                    getattr(e, "read_bytes", "?"),
-                )
-                # Try again as long as there are interventions left
-        else:
-            raise CommunicationError("Could not get raw REPL")
-
-    def _log_output(self, data: bytes, stream: str = "stdout") -> None:
-        logger.debug("read %s: %r", stream, data)
-
-    def _prepare_helper(self) -> None:
-        script = (
-            dedent(
-                """
-            class __minny_helper:
-                import os, sys, builtins
-
-                def print_mgmt_value(cls, obj):
-                    __minny_helper.builtins.print({mgmt_start!r}, __minny_helper.builtins.repr(obj), {mgmt_end!r}, sep='', end='')
-                
-                def file_crc32(path, block_size=4096):
-                    try:
-                        from binascii import crc32
-                    except __minny_helper.builtins.ImportError:
-                        return None
-                    crc = 0
-                    try:
-                        f = open(path, "rb")
-                    except OSError as e:
-                        if e.args[0] == 2: return None
-                        raise
-                    try:
-                        while True:
-                            chunk = f.read(block_size)
-                            if not chunk: break
-                            crc = crc32(chunk, crc)
-                    finally:
-                        f.close()
-                    return crc                 
-            """
-            ).format(
-                mgmt_start=MGMT_VALUE_START.decode(ENCODING),
-                mgmt_end=MGMT_VALUE_END.decode(ENCODING),
-            )
-            + "\n"
-        ).lstrip()
-        self._execute_without_output(script)
-
-    def fetch_sys_path(self) -> List[str]:
-        return self._evaluate("__minny_helper.sys.path")
-
-    def fetch_sys_implementation(self) -> Dict[str, Any]:
-        return self._evaluate(
-            "{key: __minny_helper.builtins.getattr(__minny_helper.sys.implementation, key, None) for key in ['name', 'version', '_mpy']}"
-        )
-
-    def try_get_stat(self, path: str) -> Optional[os.stat_result]:
-        self._evaluate(
-            dedent(
-                f"""
-            try:
-                __minny_helper.print_mgmt_value(__minny_helper.os.stat({path!r}))
-            except __minny_helper.builtins.OSError as e:
-                if e.args[0] == 2 # ENOENT:
-                    __minny_helper.print_mgmt_value(None)
-                else:
-                    raise
-        """
-            )
-        )
-
-    def try_get_crc32(self, path: str) -> Optional[int]:
-        result = self._evaluate(f"__minny_helper.file_crc32({path!r})")
-        assert result is None or result >= 0
-        return result
-
-    def read_file(self, path: str) -> bytes:
-        hex_mode = self._should_hexlify(path)
-
-        open_script = f"__minny_fp = __minny_helper.builtins.open({path!r}, 'rb')"
-        out, err = self._execute_and_capture_output(open_script)
-
-        if (out + err).strip():
-            if any(str(nr) in out + err for nr in [errno.ENOENT, errno.ENODEV]):
-                raise FileNotFoundError(f"Can't find {path} on target")
-            else:
-                raise ManagementError(
-                    f"Could not open file {path} for reading", script=open_script, out=out, err=err
-                )
-
-        if hex_mode:
-            self._execute_without_output("from binascii import hexlify as __temp_hexlify")
-
-        block_size = 1024
-        num_bytes_read = 0
-        blocks = []
-        while True:
-            if hex_mode:
-                block = binascii.unhexlify(
-                    self._evaluate("__temp_hexlify(__minny_fp.read(%s))" % block_size)
-                )
-            else:
-                block = self._evaluate("__minny_fp.read(%s)" % block_size)
-
-            if block:
-                blocks.append(block)
-                num_bytes_read += len(block)
-
-            if len(block) < block_size:
-                break
-
-        self._execute_without_output(
-            dedent(
-                """
-            __minny_fp.close()
-            del __minny_fp
-            try:
-                del __temp_hexlify
-            except:
-                pass
-            """
-            )
-        )
-
-        return b"".join(blocks)
-
-    def remove_file_if_exists(self, path: str) -> None:
-        self._execute_without_output(
-            dedent(
-                f"""
-            try:
-                __minny_helper.os.stat({path!r}) and None
-            except __minny_helper.builtins.OSError:
-                pass
-            else:
-                __minny_helper.os.remove({path!r})            
-        """
-            )
-        )
-
-    def remove_dir_if_empty(self, path: str) -> bool:
-        result = self._evaluate(
-            dedent(
-                f"""
-            if __minny_helper.os.listdir({path!r}):
-                __minny_helper.print_mgmt_value(False)
-            else:
-                __minny_helper.os.remove({path!r})
-                __minny_helper.print_mgmt_value(True)
-        """
-            )
-        )
-
-        if path in self._ensured_directories:
-            self._ensured_directories.remove(path)
-
-        return result
+        self._sync_remote_filesystem()
 
     def mkdir_in_existing_parent_exists_ok(self, path: str) -> None:
+        # TODO: check for read only fs
         self._execute_without_output(
             dedent(
                 f"""
@@ -322,585 +466,18 @@ class BareMetalTargetManager(TargetManager, ABC):
             )
         )
 
-    def listdir(self, path: str) -> List[str]:
-        return self._evaluate(
-            f"__minny_helper.print_mgmt_value(__minny_helper.os.listdir({path!r}))"
-        )
-
-    def rmdir(self, path: str) -> None:
-        self._execute_without_output(
-            f"__minny_helper.print_mgmt_value(__minny_helper.os.rmdir({path!r}))"
-        )
-
-        if path in self._ensured_directories:
-            self._ensured_directories.remove(path)
-
-    def _submit_code(self, script: str) -> None:
-        assert script
-
-        to_be_sent = script.encode("UTF-8")
-        logger.debug("Submitting via %s: %r", self._submit_mode, to_be_sent[:1000])
-
-        # assuming we are already at a prompt, but threads may have produced something extra
-        discarded_bytes = self._connection.read_all()
-        if discarded_bytes:
-            logger.info("Discarding %r", discarded_bytes)
-
-        if self._submit_mode == PASTE_SUBMIT_MODE:
-            self._submit_code_via_paste_mode(to_be_sent)
-        elif self._submit_mode == RAW_PASTE_SUBMIT_MODE:
-            try:
-                self._submit_code_via_raw_paste_mode(to_be_sent)
-            except RawPasteNotSupportedError:
-                logger.warning("Could not use expected raw paste, falling back to paste mode")
-                self._submit_mode = PASTE_SUBMIT_MODE
-                self._submit_code_via_paste_mode(to_be_sent)
-        else:
-            self._submit_code_via_raw_mode(to_be_sent)
-
-    def _submit_code_via_paste_mode(self, script_bytes: bytes) -> None:
-        # Go to paste mode
-        self._ensure_normal_mode()
-        self._write(PASTE_MODE_CMD)
-        discarded = self._connection.read_until(PASTE_MODE_LINE_PREFIX)
-        logger.debug("Discarding %r", discarded)
-
-        # Send script
-        while script_bytes:
-            block = script_bytes[: self._write_block_size]
-            script_bytes = script_bytes[self._write_block_size :]
-
-            # find proper block boundary
-            while True:
-                expected_echo = block.replace(b"\r\n", b"\r\n" + PASTE_MODE_LINE_PREFIX)
-                if (
-                    len(expected_echo) > self._write_block_size
-                    or block.endswith(b"\r")
-                    or len(block) > 2
-                    and starts_with_continuation_byte(script_bytes)
-                ):
-                    # move last byte to the next block
-                    script_bytes = block[-1:] + script_bytes
-                    block = block[:-1]
-                    continue
-                else:
-                    break
-
-            self._write(block)
-            self._connection.read_all_expected(expected_echo, timeout=WAIT_OR_CRASH_TIMEOUT)
-
-        # push and read confirmation
-        self._write(EOT)
-        expected_confirmation = b"\r\n"
-        actual_confirmation = self._connection.read(
-            len(expected_confirmation), timeout=WAIT_OR_CRASH_TIMEOUT
-        )
-        assert actual_confirmation == expected_confirmation, "Expected %r, got %r" % (
-            expected_confirmation,
-            actual_confirmation,
-        )
-
-    def _submit_code_via_raw_mode(self, script_bytes: bytes) -> None:
-        self._ensure_raw_mode()
-
-        to_be_written = script_bytes + EOT
-
-        while to_be_written:
-            block = to_be_written[self._write_block_size :]
-            self._write(block)
-            to_be_written = to_be_written[len(block) :]
-            if to_be_written:
-                time.sleep(self._write_block_delay)
-
-        # fetch command confirmation
-        confirmation = self._connection.soft_read(2, timeout=WAIT_OR_CRASH_TIMEOUT)
-
-        if confirmation != OK:
-            data = confirmation + self._connection.read_all()
-            data += self._connection.read(1, timeout=1, timeout_is_soft=True)
-            data += self._connection.read_all()
-            logger.error(
-                "Could not read command confirmation for script\n\n: %s\n\n" + "Got: %r",
-                script_bytes,
-                data,
-            )
-            raise ProtocolError("Could not read command confirmation")
-
-    def _submit_code_via_raw_paste_mode(self, script_bytes: bytes) -> None:
-        self._ensure_raw_mode()
-        self._connection.set_text_mode(False)
-        self._write(RAW_PASTE_COMMAND)
-        response = self._connection.soft_read(2, timeout=WAIT_OR_CRASH_TIMEOUT)
-        if response != RAW_PASTE_CONFIRMATION:
-            # Occasionally, the device initially supports raw paste but later doesn't allow it
-            # https://github.com/thonny/thonny/issues/1545
-            time.sleep(0.01)
-            response += self._connection.read_all()
-            if response == FIRST_RAW_PROMPT:
-                self._last_prompt = FIRST_RAW_PROMPT
-                raise RawPasteNotSupportedError()
-            else:
-                logger.error("Got %r instead of raw-paste confirmation", response)
-                raise ProtocolError("Could not get raw-paste confirmation")
-
-        self._raw_paste_write(script_bytes)
-        self._connection.set_text_mode(True)
-
-    def _raw_paste_write(self, command_bytes):
-        # Adapted from https://github.com/micropython/micropython/commit/a59282b9bfb6928cd68b696258c0dd2280244eb3#diff-cf10d3c1fe676599a983c0ec85b78c56c9a6f21b2d896c69b3e13f34d454153e
-
-        # Read initial header, with window size.
-        data = self._connection.soft_read(2, timeout=2)
-        assert len(data) == 2, "Could not read initial header, got %r" % (
-            data + self._connection.read_all()
-        )
-        window_size = data[0] | data[1] << 8
-        window_remain = window_size
-
-        # Write out the command_bytes data.
-        i = 0
-        while i < len(command_bytes):
-            while window_remain == 0 or not self._connection.incoming_is_empty():
-                data = self._connection.soft_read(1, timeout=WAIT_OR_CRASH_TIMEOUT)
-                if data == b"\x01":
-                    # Device indicated that a new window of data can be sent.
-                    window_remain += window_size
-                elif data == b"\x04":
-                    # Device indicated abrupt end, most likely a syntax error.
-                    # Acknowledge it and finish.
-                    self._write(b"\x04")
-                    logger.debug(
-                        "Abrupt end of raw paste submit after submitting %s bytes out of %s",
-                        i,
-                        len(command_bytes),
-                    )
-                    return
-                else:
-                    # Unexpected data from device.
-                    logger.error("Unexpected read during raw paste: %r", data)
-                    raise ProtocolError("Unexpected read during raw paste")
-            # Send out as much data as possible that fits within the allowed window.
-            b = command_bytes[i : min(i + window_remain, len(command_bytes))]
-            self._write(b)
-            window_remain -= len(b)
-            i += len(b)
-
-        # Indicate end of data.
-        self._write(b"\x04")
-
-        # Wait for device to acknowledge end of data.
-        data = self._connection.soft_read_until(b"\x04", timeout=WAIT_OR_CRASH_TIMEOUT)
-        if not data.endswith(b"\x04"):
-            logger.error("Could not complete raw paste. Ack: %r", data)
-            raise ProtocolError("Could not complete raw paste")
-
-    def _ensure_raw_mode(self):
-        if self._last_prompt in [
-            RAW_PROMPT,
-            EOT + RAW_PROMPT,
-            FIRST_RAW_PROMPT,
-        ]:
-            return
-        logger.debug("requesting raw mode at %r", self._last_prompt)
-
-        # assuming we are currently on a normal prompt
-        self._write(RAW_MODE_CMD)
-        self._log_output_until_active_prompt()
-        if self._last_prompt == NORMAL_PROMPT:
-            # Don't know why this happens sometimes (e.g. when interrupting a Ctrl+D or restarted
-            # program, which is outputting text on ESP32)
-            logger.info("Found normal prompt instead of expected raw prompt. Trying again.")
-            self._write(RAW_MODE_CMD)
-            time.sleep(0.5)
-            self._log_output_until_active_prompt()
-
-        if self._last_prompt != FIRST_RAW_PROMPT:
-            logger.error(
-                "Could not enter raw prompt, got %r",
-                self._last_prompt,
-            )
-            raise ProtocolError("Could not enter raw prompt")
-
-    def _ensure_normal_mode(self, force=False):
-        if self._last_prompt == NORMAL_PROMPT and not force:
-            return
-
-        logger.debug("requesting normal mode at %r", self._last_prompt)
-        self._write(NORMAL_MODE_CMD)
-        self._log_output_until_active_prompt()
-        assert self._last_prompt == NORMAL_PROMPT, (
-            "Could not get normal prompt, got %r" % self._last_prompt
-        )
-
-    def _log_output_until_active_prompt(self, timeout: float = WAIT_OR_CRASH_TIMEOUT) -> None:
-        def collect_output(data, stream):
-            if data:
-                logger.info("Discarding %s: %r", stream, data)
-
-        self._process_output_until_active_prompt(collect_output, timeout=timeout)
-
-    def _capture_output_until_active_prompt(self, timeout: float) -> Tuple[str, str]:
-        output = {"stdout": "", "stderr": ""}
-
-        def collect_output(data, stream):
-            output[stream] += data
-
-        self._process_output_until_active_prompt(collect_output, timeout=timeout)
-
-        return output["stdout"], output["stderr"]
-
-    def _process_output_until_active_prompt(
-        self,
-        output_consumer: OutputConsumer,
-        timeout: float,
-    ):
-        PROMPT_MARKERS: List[bytes] = [NORMAL_PROMPT, EOT + RAW_PROMPT, FIRST_RAW_PROMPT]
-        PROMPT_MARKERS_RE = re.compile(b"|".join([re.escape(m) for m in PROMPT_MARKERS]))
-
-        start_time = time.time()
-
-        while True:
-            spent_time = time.time() - start_time
-            time_left = max(timeout - spent_time, 0.0)
-            data = self._connection.read_until(PROMPT_MARKERS_RE, timeout=time_left)
-            assert any(data.endswith(marker) for marker in PROMPT_MARKERS)
-
-            for prompt in PROMPT_MARKERS:
-                if data.endswith(prompt):
-                    self._last_prompt = prompt
-                    content = data[: -len(self._last_prompt)]
-                    if EOT in content:
-                        out, err = content.split(EOT, maxsplit=1)
-                    elif TRACEBACK_MARKER in content:
-                        out, err = content.split(TRACEBACK_MARKER, maxsplit=1)
-                        err = TRACEBACK_MARKER + err
-                    else:
-                        out = content
-                        err = b""
-                    output_consumer(out.decode(ENCODING), "stdout")
-                    if err:
-                        output_consumer(err.decode(ENCODING), "stderr")
-                    break
-
-            # Check if it's really active prompt
-            follow_up = self._connection.soft_read(1, timeout=0.01)
-            if follow_up == ESC:
-                # See if it's followed by a OSC code, like the one output by CircuitPython 8
-                follow_up += self._connection.soft_read_until(ST)
-                if follow_up.endswith(ST):
-                    logger.debug("Dropping OSC sequence %r", follow_up)
-                follow_up = b""
-            if follow_up:
-                # Nope, the prompt is not active.
-                # (Actually it may be that a background thread has produced this follow up,
-                # but this would be too hard to consider.)
-                # Don't output yet, because the follow-up may turn into another prompt,
-                # and they can be captured all together.
-                self._connection.unread(follow_up)
-                assert self._last_prompt is not None
-                output_consumer(self._last_prompt.decode(ENCODING), "stdout")
-            else:
-                break
-
-    def _evaluate(self, script: str) -> Any:
-        """Evaluate the output of the script or raise error, if anything looks wrong.
-
-        Adds printing code if the script contains single expression and doesn't
-        already contain printing code"""
-        try:
-            ast.parse(script, mode="eval")
-            prefix = "__minny_helper.print_mgmt_value("
-            suffix = ")"
-            if not script.strip().startswith(prefix):
-                script = prefix + script + suffix
-        except SyntaxError:
-            pass
-
-        out, err = self._execute_and_capture_output(script)
-        if err:
-            raise ManagementError("Script produced errors", script, out, err)
-        elif (
-            MGMT_VALUE_START.decode(ENCODING) not in out
-            or MGMT_VALUE_END.decode(ENCODING) not in out
-        ):
-            raise ManagementError("Management markers missing", script, out, err)
-
-        start_token_pos = out.index(MGMT_VALUE_START.decode(ENCODING))
-        end_token_pos = out.index(MGMT_VALUE_END.decode(ENCODING))
-
-        # a thread or IRQ handler may have written something before or after mgmt value
-        prefix = out[:start_token_pos]
-        value_str = out[start_token_pos + len(MGMT_VALUE_START) : end_token_pos]
-        suffix = out[end_token_pos + len(MGMT_VALUE_END) :]
-
-        try:
-            value = ast.literal_eval(value_str)
-        except Exception as e:
-            raise ManagementError("Could not parse management response", script, out, err) from e
-
-        if prefix:
-            logger.warning("Eval output had unexpected prefix: %r", prefix)
-        if suffix:
-            logger.warning("Eval output had unexpected suffix: %r", suffix)
-
-        return value
-
-    def _write(self, data: bytes) -> None:
-        if (
-            RAW_MODE_CMD in data
-            or NORMAL_MODE_CMD in data
-            or INTERRUPT_CMD in data
-            or EOT in data
-            or PASTE_MODE_CMD in data
-        ):
-            logger.debug("Sending ctrl chars: %r", data)
-        num_bytes = self._connection.write(data)
-        assert num_bytes == len(data)
-
-    def _should_hexlify(self, path):
-        if "binascii" not in self._builtin_modules and "ubinascii" not in self._builtin_modules:
-            return False
-
-        for ext in (".py", ".txt", ".csv", "METADATA", "RECORD"):
-            if path.lower().endswith(ext):
-                return False
-
-        return True
-
-    def _execute_without_output(self, script: str, timeout: float = WAIT_OR_CRASH_TIMEOUT) -> None:
-        """Meant for management tasks."""
-        out, err = self._execute_and_capture_output(script, timeout=timeout)
-        if out or err:
-            raise ManagementError("Command output was not empty", script, out, err)
-
-    def _execute_and_capture_output(
-        self, script: str, timeout: float = WAIT_OR_CRASH_TIMEOUT
-    ) -> Tuple[str, str]:
-        output_lists: Dict[str, List[str]] = {"stdout": [], "stderr": []}
-
-        def consume_output(data, stream_name):
-            assert isinstance(data, str)
-            output_lists[stream_name].append(data)
-
-        self._execute_with_consumer(script, consume_output, timeout=timeout)
-        result = ["".join(output_lists[name]) for name in ["stdout", "stderr"]]
-        return result[0], result[1]
-
-    def _execute_with_consumer(
-        self, script, output_consumer: OutputConsumer, timeout: float
-    ) -> None:
-        self._submit_code(script)
-        self._process_output_until_active_prompt(output_consumer, timeout=timeout)
-
-
-class SerialPortTargetManager(BareMetalTargetManager):
-    def __init__(
-        self,
-        connection: SerialConnection,
-        submit_mode: Optional[str] = None,
-        write_block_size: Optional[int] = None,
-        write_block_delay: Optional[float] = None,
-        mount_path: Optional[str] = None,
-    ):
-        super().__init__(
-            connection,
-            submit_mode=submit_mode,
-            write_block_size=write_block_size,
-            write_block_delay=write_block_delay,
-        )
-        self._mount_path = mount_path
-        self._read_only_filesystem = False
-
-    def _internal_path_to_mounted_path(self, target_path: str) -> str:
-        assert self._mount_path
-        assert target_path.startswith("/")
-        return os.path.normpath(os.path.join(self._mount_path, target_path[1:]))
-
-    def write_file_in_existing_dir(self, path: str, content: bytes) -> None:
-        start_time = time.time()
-
-        if self._read_only_filesystem:
-            self._write_file_via_mount(path, content)
-
-        try:
-            self._write_file_via_serial(path, content)
-        except ReadOnlyFilesystemError:
-            self._read_only_filesystem = True
-            self._write_file_via_mount(path, content)
-
-        logger.info("Wrote %s in %.1f seconds", path, time.time() - start_time)
-
-    def _write_file_via_mount(
-        self,
-        target_path: str,
-        content: bytes,
-    ) -> None:
-        mounted_target_path = self._internal_path_to_mounted_path(target_path)
-        with open(mounted_target_path, "wb") as f:
-            bytes_written = 0
-            block_size = 4 * 1024
-            to_be_written = content
-            while to_be_written:
-                block = to_be_written[:block_size]
-                bytes_written += f.write(block)
-                assert bytes_written
-                f.flush()
-                os.fsync(f)
-                to_be_written = to_be_written[block_size:]
-
-        assert bytes_written == len(content)
-
-    def _write_file_via_serial(
-        self, target_path: str, content: bytes, can_hexlify: bool = True
-    ) -> None:
-        out, err = self._execute_and_capture_output(
-            dedent(
-                """
-                __minny_path = '{path}'
-                __minny_written = 0
-                __minny_fp = __minny_helper.builtins.open(__minny_path, 'wb')
-            """
-            ).format(path=target_path),
-        )
-
-        if self._contains_read_only_error(out + err):
-            raise ReadOnlyFilesystemError()
-        elif out + err:
-            raise OSError(
-                "Could not open file %s for writing, output:\n%s" % (target_path, out + err)
-            )
-
-        # Define function to allow shorter write commands
-        hex_mode = self._should_hexlify(target_path)
-        if hex_mode:
-            self._execute_without_output(
-                dedent(
-                    """
-                from binascii import unhexlify as __minny_unhex
-                def __W(x):
-                    global __minny_written
-                    __minny_written += __minny_fp.write(__minny_unhex(x))
-                    __minny_fp.flush()
-                    if __minny_helper.builtins.hasattr(__minny_helper.os, "sync"):
-                        __minny_helper.os.sync()
-            """
-                )
-            )
-        else:
-            self._execute_without_output(
-                dedent(
-                    """
-                def __W(x):
-                    global __minny_written
-                    __minny_written += __minny_fp.write(x)
-                    __minny_fp.flush()
-                    if __minny_helper.builtins.hasattr(__minny_helper.os, "sync"):
-                        __minny_helper.os.sync()
-            """
-                )
-            )
-
-        bytes_sent = 0
-        block_size = 1024
-
-        to_be_written = content
-        while to_be_written:
-            block = to_be_written[:block_size]
-            if hex_mode:
-                script = "__W(%r)" % binascii.hexlify(block)
-            else:
-                script = "__W(%r)" % block
-            out, err = self._execute_and_capture_output(script)
-            if out or err:
-                logger.error("Writing file produced unexpected output (%r) or error (%r)", out, err)
-                raise UserError(
-                    "Could not write next block after having written %d bytes to %s"
-                    % (bytes_sent, target_path)
-                )
-
-            bytes_sent += len(block)
-            to_be_written = to_be_written[block_size:]
-
-        bytes_received = self._evaluate("__minny_written")
-
-        if bytes_received != bytes_sent:
-            raise OSError("Expected %d written bytes but wrote %d" % (bytes_sent, bytes_received))
-
-        # clean up
-        self._execute_without_output(
-            dedent(
-                """
-                try:
-                    del __W
-                    del __minny_written
-                    del __minny_path
-                    __minny_fp.close()
-                    del __minny_fp
-                    del __minny_result
-                    del __minny_unhex
-                except:
-                    pass
-            """
-            )
-        )
-
-    def remove_file_if_exists(self, path: str) -> None:
-        if self._read_only_filesystem:
-            self._remove_file_via_mount(path)
-            return
-
-        try:
-            super().remove_file_if_exists(path)
-        except ManagementError as e:
-            if self._contains_read_only_error(e.out + e.err):
-                self._read_only_filesystem = True
-                self._remove_file_via_mount(path)
-            else:
-                raise
-
-    def _remove_file_via_mount(self, target_path: str) -> None:
-        logger.info("Removing %s via mount", target_path)
-        mounted_target_path = self._internal_path_to_mounted_path(target_path)
-        assert os.path.isfile(mounted_target_path)
-        os.remove(mounted_target_path)
-
-    def _contains_read_only_error(self, s: str) -> bool:
-        canonic_out = s.replace("-", "").lower()
-        return (
-            "readonly" in canonic_out
-            or f"errno {errno.EROFS}" in canonic_out
-            or f"oserror: {errno.EROFS}" in canonic_out
-        )
-
-    def mkdir_in_existing_parent_exists_ok(self, path: str) -> None:
-        if self._read_only_filesystem:
-            self._mkdir_via_mount(path)
-            return
-
-        try:
-            super().mkdir_in_existing_parent_exists_ok(path)
-        except ManagementError as e:
-            if self._contains_read_only_error(e.out + e.err):
-                self._read_only_filesystem = True
-                self._mkdir_via_mount(path)
-            else:
-                raise
-
-    def _mkdir_via_mount(self, path: str) -> bool:
+    def _makedirs_via_mount(self, path):
         mounted_path = self._internal_path_to_mounted_path(path)
-        if not os.path.isdir(mounted_path):
-            assert not os.path.exists(mounted_path)
-            os.mkdir(mounted_path, 0o755)
-            return True
-        else:
-            return False
+        assert mounted_path is not None, "Couldn't find mounted path for " + path
+        os.makedirs(mounted_path, exist_ok=True)
+        try_sync_local_filesystem()
 
     def remove_dir_if_empty(self, path: str) -> bool:
         if self._read_only_filesystem:
             return self._remove_dir_if_empty_via_mount(path)
 
         try:
-            return super().remove_dir_if_empty(path)
+            return self._remove_dir_if_empty_via_repl(path)
         except ManagementError as e:
             if self._contains_read_only_error(e.out + e.err):
                 self._read_only_filesystem = True
@@ -916,43 +493,164 @@ class SerialPortTargetManager(BareMetalTargetManager):
             os.rmdir(mounted_path)
             return True
 
+    def _remove_file_via_mount_if_exists(self, target_path: str) -> bool:
+        logger.info("Removing %s via mount", target_path)
+        mounted_target_path = self._internal_path_to_mounted_path(target_path)
+        if not os.path.exists(mounted_target_path):
+            return False
 
-class WebReplTargetManager(BareMetalTargetManager):
-    def write_file_in_existing_dir(self, path: str, content: bytes) -> None:
-        """
-        Adapted from https://github.com/micropython/webrepl/blob/master/webrepl_cli.py
-        """
-        dest_fname = path.encode("utf-8")
-        rec = struct.pack(
-            WEBREPL_REQ_S, b"WA", WEBREPL_PUT_FILE, 0, 0, len(content), len(dest_fname), dest_fname
-        )
-        self._connection.set_text_mode(False)
+        assert os.path.isfile(mounted_target_path)
+        os.remove(mounted_target_path)
+        try_sync_local_filesystem()
+        return True
+
+    def remove_file_if_exists(self, path: str) -> bool:
+        if self._read_only_filesystem:
+            return self._remove_file_via_mount_if_exists(path)
+
         try:
-            self._write(rec[:10])
-            self._write(rec[10:])
-            assert self._read_websocket_response() == 0
+            return self.remove_file_if_exists_via_repl(path)
+        except ManagementError as e:
+            if self._contains_read_only_error(e.out + e.err):
+                self._read_only_filesystem = True
+                return self._remove_file_via_mount_if_exists(path)
+            else:
+                raise
 
-            to_be_written = content
-            block_size = 1024
-            while to_be_written:
-                block = to_be_written[:block_size]
-                self._write(block)
-                to_be_written = to_be_written[block_size:]
+    def _delete_recursively_via_mount(self, paths):
+        for path in paths:
+            mounted_path = self._internal_path_to_mounted_path(path)
+            assert mounted_path is not None
+            if os.path.isdir(mounted_path):
+                import shutil
 
-            assert self._read_websocket_response() == 0
-        finally:
-            self._connection.set_text_mode(True)
+                shutil.rmtree(mounted_path)
+            else:
+                os.remove(mounted_path)
 
-    def _read_websocket_response(self):
-        data = self._connection.read(4)
-        sig, code = struct.unpack("<2sH", data)
-        assert sig == b"WB"
-        return code
+        try_sync_local_filesystem()
 
+    def _get_fs_mount_label(self):
+        # This method is most likely required with CircuitPython,
+        # so try its approach first
+        # https://learn.adafruit.com/welcome-to-circuitpython/the-circuitpy-drive
 
-class RawPasteNotSupportedError(RuntimeError):
-    pass
+        result = self._evaluate(
+            dedent(
+                """
+            try:
+                from storage import getmount as __thonny_getmount
+                try:
+                    __thonny_result = __thonny_getmount("/").label
+                finally:
+                    del __thonny_getmount
+            except __thonny_helper.builtins.ImportError:
+                __thonny_result = None 
+            except __thonny_helper.builtins.OSError:
+                __thonny_result = None 
 
+            __thonny_helper.print_mgmt_value(__thonny_result)
 
-class ReadOnlyFilesystemError(OSError):
-    pass
+            del __thonny_result
+            """
+            )
+        )
+
+        if result is not None:
+            return result
+
+        if self._welcome_text is None:
+            return None
+
+        """
+        # following is not reliable and probably not needed 
+        markers_by_name = {"PYBFLASH": {"pyb"}, "CIRCUITPY": {"circuitpython"}}
+
+        for name in markers_by_name:
+            for marker in markers_by_name[name]:
+                if marker.lower() in self._welcome_text.lower():
+                    return name
+        """
+
+        return None
+
+    def _get_flash_prefix(self):
+        assert self._welcome_text is not None
+        if not self._supports_directories():
+            return ""
+        elif (
+            "LoBo" in self._welcome_text
+            or "WiPy with ESP32" in self._welcome_text
+            or "PYBLITE" in self._welcome_text
+            or "PYBv" in self._welcome_text
+            or "PYBOARD" in self._welcome_text.upper()
+        ):
+            return "/flash/"
+        else:
+            return "/"
+
+    def _get_fs_mount(self):
+        if self._last_inferred_fs_mount and os.path.isdir(self._last_inferred_fs_mount):
+            logger.debug("Using cached mount path %r", self._last_inferred_fs_mount)
+            return self._last_inferred_fs_mount
+
+        logger.debug("Computing mount path")
+
+        label = self._get_fs_mount_label()
+        if label is None:
+            self._last_inferred_fs_mount = None
+        else:
+            candidates = find_volumes_by_name(label)
+            if len(candidates) == 0:
+                raise RuntimeError(f"Could not find volume {label}")
+            elif len(candidates) > 1:
+                raise RuntimeError("Found several possible mount points: %s" % candidates)
+            else:
+                self._last_inferred_fs_mount = candidates[0]
+
+        return self._last_inferred_fs_mount
+
+    def _is_connected(self):
+        return self._connection._error is None
+
+    def _get_epoch_offset(self) -> int:
+        # https://docs.micropython.org/en/latest/library/utime.html
+        # NB! Some boards (eg Pycom) may use Posix epoch!
+        try:
+            return super()._get_epoch_offset()
+        except NotImplementedError:
+            return Y2000_EPOCH_OFFSET
+
+    def _get_sep(self):
+        if self._supports_directories():
+            return "/"
+        else:
+            return ""
+
+    def _extract_block_without_splitting_chars(self, source_bytes: bytes) -> bytes:
+        i = self._write_block_size
+        while i > 1 and i < len(source_bytes) and is_continuation_byte(source_bytes[i]):
+            i -= 1
+
+        return source_bytes[:i]
+
+    def _output_warrants_interrupt(self, data):
+        if self._connected_to_circuitpython():
+            _ENTER_REPL_PHRASES = [
+                "Press any key to enter the REPL. Use CTRL-D to reload.",
+                "Appuyez sur n'importe quelle touche pour utiliser le REPL. Utilisez CTRL-D pour relancer.",
+                "Presiona cualquier tecla para entrar al REPL. Usa CTRL-D para recargar.",
+                "Drücke eine beliebige Taste um REPL zu betreten. Drücke STRG-D zum neuladen.",
+                "Druk een willekeurige toets om de REPL te starten. Gebruik CTRL+D om te herstarten.",
+                "àn rèn hé jiàn jìn rù REPL. shǐ yòng CTRL-D zhòng xīn jiā zǎi ."
+                "Tekan sembarang tombol untuk masuk ke REPL. Tekan CTRL-D untuk memuat ulang.",
+                "Pressione qualquer tecla para entrar no REPL. Use CTRL-D para recarregar.",
+                "Tryck på valfri tangent för att gå in i REPL. Använd CTRL-D för att ladda om.",
+                "Нажмите любую клавишу чтобы зайти в REPL. Используйте CTRL-D для перезагрузки.",
+            ]
+            data = data.strip()
+            for phrase in _ENTER_REPL_PHRASES:
+                if data.endswith(phrase.encode("utf-8")):
+                    return True
+
+        return False
