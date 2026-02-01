@@ -96,6 +96,10 @@ class SerialConnection(MicroPythonConnection):
         assert size == len(data)
         return len(data)
 
+    def stop_reader(self) -> None:
+        super().stop_reader()
+        self._serial.cancel_read()
+
     def _listen_serial(self):
         "NB! works in background thread"
         try:

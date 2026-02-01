@@ -497,7 +497,7 @@ def _heuristic_package_dirs(project_dir: Path, project_name: str) -> Dict[str, P
         package_dirs = _scan_roots_for_packages(roots)
 
     if not package_dirs:
-        raise ValueError("Could not determine package directories")
+        raise ValueError(f"Could not determine package directories in {project_dir}")
 
     return package_dirs
 

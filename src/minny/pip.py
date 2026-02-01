@@ -75,7 +75,7 @@ class PipInstaller(Installer):
 
         self.validate_editables(editables)
 
-        compiler = Compiler(self._tmgr, self._minny_cache_dir, mpy_cross)
+        compiler = Compiler(self._tmgr, mpy_cross, self._minny_cache_dir)
 
         venv_dir = self._populate_venv()
         site_packages_dir = get_venv_site_packages_path(venv_dir)

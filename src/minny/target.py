@@ -7,6 +7,7 @@ import os.path
 import re
 import stat
 import sys
+import textwrap
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -14,7 +15,7 @@ from logging import getLogger
 from textwrap import dedent
 from typing import Any, BinaryIO, Callable, Dict, List, Optional, Tuple, Union, cast
 
-from minny.common import UserError
+from minny.common import ManagementError, ProtocolError, UserError
 from minny.connection import MicroPythonConnection
 from minny.io_handling import IOHandler
 from minny.timing import report_time
@@ -41,13 +42,13 @@ RAW_PASTE_CONTINUE = b"\x01"
 # first prompt when switching to raw mode (or after soft reboot in raw mode)
 # Looks like it's not translatable in CP
 # https://github.com/adafruit/circuitpython/blob/master/locale/circuitpython.pot
-FIRST_RAW_PROMPT = b"raw REPL; CTRL-B to exit\r\n>"
+FIRST_RAW_PROMPT: bytes = b"raw REPL; CTRL-B to exit\r\n>"
 # https://forum.micropython.org/viewtopic.php?f=12&t=7652&hilit=w600#p43640
 W600_FIRST_RAW_PROMPT = b"raw REPL; CTRL-B to exit\r\r\n>"
 
 RAW_PROMPT = b">"
 
-NORMAL_PROMPT = b">>> "
+NORMAL_PROMPT: bytes = b">>> "
 LF = b"\n"
 OK = b"OK"
 ESC = b"\x1b"
@@ -65,9 +66,11 @@ SOFT_REBOOT_CMD: bytes = b"\x04"
 # Output tokens
 VALUE_REPR_START = b"<repr>"
 VALUE_REPR_END = b"</repr>"
-EOT = b"\x04"
+EOT: bytes = b"\x04"
 MGMT_VALUE_START = b"<minny>"
 MGMT_VALUE_END = b"</minny>"
+OBJECT_LINK_START = "[ide_object_link=%d]"
+OBJECT_LINK_END = "[/ide_object_link]"
 
 
 # How many seconds to wait for something that should appear quickly.
@@ -141,7 +144,8 @@ class TargetManager(ABC):
     def try_get_stat(self, path: str) -> Optional[os.stat_result]: ...
 
     @abstractmethod
-    def try_get_crc32(self, path: str) -> Optional[int]: ...
+    def try_get_crc32(self, path: str) -> Optional[int]:
+        """ "Returns crc32 if path refers an existing file or None if path does not exist"""
 
     def is_dir(self, path: str) -> bool:
         stat_result = self.try_get_stat(path)
@@ -326,9 +330,9 @@ class ProperTargetManager(TargetManager, ABC):
         self._local_cwd = None
         self._cwd: Optional[str] = cwd
         self._progress_times = {}
-        self._welcome_text = None
+        self._welcome_text: Optional[str] = None
         self._board_id: Optional[str] = None
-        self._sys_path = None
+        self._sys_path: Optional[List[str]] = None
         self._sys_implementation = None
         self._epoch_year: Optional[int] = None
         self._builtin_modules = []
@@ -341,9 +345,7 @@ class ProperTargetManager(TargetManager, ABC):
         if clean:
             self._restart_interpreter()
 
-        if self._welcome_text is None:
-            self._welcome_text = self._fetch_welcome_text()
-            report_time("got welcome")
+        self._welcome_text = self._fetch_welcome_text()
 
         self._do_prepare()
 
@@ -358,8 +360,21 @@ class ProperTargetManager(TargetManager, ABC):
         if self._epoch_year is None:
             self._epoch_year = self._fetch_epoch_year()
 
+    def get_cwd(self) -> str:
+        if self._cwd is None:
+            self._cwd = self._fetch_cwd()
+
+        return self._cwd
+
+    def get_welcome_text(self) -> str:
+        assert self._welcome_text is not None
+        return self._welcome_text
+
+    def get_submit_mode(self) -> str:
+        return self._submit_mode
+
     def try_get_crc32(self, path: str) -> Optional[int]:
-        result = self._evaluate(f"__minny_helper.file_crc32({path!r})")
+        result = self._evaluate(f"__minny_helper.try_file_crc32({path!r})")
         assert result is None or result >= 0
         return result
 
@@ -370,8 +385,8 @@ class ProperTargetManager(TargetManager, ABC):
 
     def _check_prepare(self) -> None:
         if self._is_prepared is None:
-            result = self._execute("__thonny_helper", True)
-            self._is_prepared = "<class '__thonny_helper'>" in result
+            out, err = self._execute("__minny_helper", True, require_helper=False)
+            self._is_prepared = not err and out.strip() == "<class '__minny_helper'>"
 
         if not self._is_prepared:
             self._do_prepare()
@@ -382,26 +397,20 @@ class ProperTargetManager(TargetManager, ABC):
         script = self._get_helper_code()
         logger.debug("Helper code:\n%s", script)
         self._check_perform_just_in_case_gc()
-        self._execute_without_output(script)
+        self._execute_without_output(script, require_helper=False)
 
         # See https://github.com/thonny/thonny/issues/1877
         # self._execute_without_output(
         #     dedent(
         #         """
-        #     for key in __thonny_helper.builtins.dir(__thonny_helper.builtins):
+        #     for key in __minny_helper.builtins.dir(__minny_helper.builtins):
         #         if not key.startswith("__"):
-        #             __thonny_helper.builtins.globals()[key] = None
+        #             __minny_helper.builtins.globals()[key] = None
         #     """
         #     ).strip()
         # )
 
         report_time("prepared helpers")
-
-        self._update_cwd()
-        report_time("got cwd")
-        self._sys_path = self._fetch_sys_path()
-
-        report_time("prepared")
         self._check_perform_just_in_case_gc()
         logger.info("Prepared")
 
@@ -412,7 +421,8 @@ class ProperTargetManager(TargetManager, ABC):
         return self._board_id
 
     def get_sys_path(self) -> List[str]:
-        assert self._sys_path is not None
+        if self._sys_path is None:
+            self._sys_path = self._fetch_sys_path()
         return self._sys_path
 
     def get_sys_implementation(self) -> Dict[str, Any]:
@@ -426,12 +436,18 @@ class ProperTargetManager(TargetManager, ABC):
             "{key: __minny_helper.builtins.getattr(__minny_helper.sys.implementation, key, None) for key in ['name', 'version', '_mpy']}"
         )
 
-    def _update_cwd(self):
+    def chdir(self, path: str) -> None:
+        if not self._supports_directories():
+            raise UserError("This device doesn't have directories")
+
+        self._execute("__minny_helper.chdir(%r)" % path)
+        self._cwd = path
+
+    def _fetch_cwd(self) -> str:
         if self._using_simplified_micropython():
-            self._cwd = ""
+            return ""
         else:
-            logger.debug("Updating cwd")
-            self._cwd = self._evaluate("__thonny_helper.getcwd()")
+            return self._evaluate("__minny_helper.getcwd()")
 
     def _check_perform_just_in_case_gc(self):
         if self._using_simplified_micropython():
@@ -447,7 +463,8 @@ class ProperTargetManager(TargetManager, ABC):
             __thonny_gc.collect()
             del __thonny_gc
         """
-            )
+            ),
+            require_helper=False,
         )
 
     def _get_helper_code(self):
@@ -456,18 +473,45 @@ class ProperTargetManager(TargetManager, ABC):
         return (
             dedent(
                 """
-                class __thonny_helper:
+                class __minny_helper:
                     import builtins
                     try:
                         import uos as os
                     except builtins.ImportError:
                         import os
                     import sys
+                    
+                    @builtins.classmethod
+                    def try_file_crc32(cls, path):
+                        try:
+                            from binascii import crc32
+                            crc = 0
+                            with open(path, "rb") as f:
+                                for block in iter(lambda: f.read(1024), b""):
+                                    crc = crc32(block, crc)
+                            return crc & 0xFFFFFFFF
+                        except:
+                            return None                            
 
+                    @builtins.classmethod
+                    def print_repl_value(cls, obj):
+                        if obj is not None:
+                            cls.builtins.print({start_marker!r} % cls.builtins.id(obj), cls.builtins.repr(obj), {end_marker!r}, sep='')
+                            cls.last_non_none_repl_value = obj
+                
                     @builtins.classmethod
                     def print_mgmt_value(cls, obj):
                         cls.builtins.print({mgmt_start!r}, cls.builtins.repr(obj), {mgmt_end!r}, sep='', end='')
 
+                    @builtins.classmethod
+                    def repr(cls, obj):
+                        try:
+                            s = cls.builtins.repr(obj)
+                            if cls.builtins.len(s) > 50:
+                                s = s[:50] + "..."
+                            return s
+                        except cls.builtins.Exception as e:
+                            return "<could not serialize: " + __minny_helper.builtins.str(e) + ">"
 
                     @builtins.classmethod
                     def listdir(cls, x):
@@ -477,6 +521,8 @@ class ProperTargetManager(TargetManager, ABC):
                             return [rec[0] for rec in cls.os.ilistdir(x) if rec[0] not in ('.', '..')]
                 """
             ).format(
+                start_marker=OBJECT_LINK_START,
+                end_marker=OBJECT_LINK_END,
                 mgmt_start=MGMT_VALUE_START.decode(ENCODING),
                 mgmt_end=MGMT_VALUE_END.decode(ENCODING),
             )
@@ -569,7 +615,6 @@ class ProperTargetManager(TargetManager, ABC):
 
         # assuming we are already at a prompt, but threads may have produced something
         self.handle_unexpected_output()
-        self._check_prepare()
 
         to_be_sent = script.encode("UTF-8")
         log_sample_size = 1024
@@ -749,7 +794,9 @@ class ProperTargetManager(TargetManager, ABC):
             logger.error("Could not complete raw paste. Ack: %r", data)
             raise ProtocolError("Could not complete raw paste")
 
-    def _execute_with_consumer(self, script, output_consumer: Callable[[str, str], None]):
+    def _execute_with_consumer(
+        self, script, output_consumer: Callable[[str, str], None], require_helper: bool = True
+    ):
         """Ensures prompt and submits the script.
         Reads (and doesn't return) until next prompt or connection error.
 
@@ -764,7 +811,11 @@ class ProperTargetManager(TargetManager, ABC):
         required input or issue an interrupt). The UI should remind the interrupt in case
         of Thonny commands.
         """
+        if require_helper:
+            self._check_prepare()
+
         report_time("befsubcode")
+
         self._submit_code(script)
         report_time("affsubcode")
         self._process_output_until_active_prompt(output_consumer)
@@ -1108,22 +1159,22 @@ class ProperTargetManager(TargetManager, ABC):
             "micro:bit" in self._welcome_text.lower() or "calliope" in self._welcome_text.lower()
         ) and "MicroPython" in self._welcome_text
 
-    def _connected_to_pyboard(self):
+    def _connected_to_pyboard(self) -> Optional[bool]:
         if not self._welcome_text:
             return None
 
         return "pyb" in self._welcome_text.lower() or "pyb" in self._builtin_modules
 
-    def _connected_to_circuitpython(self):
+    def _connected_to_circuitpython(self) -> Optional[bool]:
         if not self._welcome_text:
             return None
 
         return "circuitpython" in self._welcome_text.lower()
 
-    def _get_interpreter_kind(self):
+    def _get_interpreter_kind(self) -> str:
         return "CircuitPython" if self._connected_to_circuitpython() else "MicroPython"
 
-    def _connected_to_pycom(self):
+    def _connected_to_pycom(self) -> Optional[bool]:
         if not self._welcome_text:
             return None
 
@@ -1142,7 +1193,7 @@ class ProperTargetManager(TargetManager, ABC):
         return welcome_text
 
     def _fetch_builtin_modules(self):
-        script = "__thonny_helper.builtins.help('modules')"
+        script = "__minny_helper.builtins.help('modules')"
         out, err = self._execute(script, capture_output=True)
         if err or not out:
             self._show_error(
@@ -1169,29 +1220,34 @@ class ProperTargetManager(TargetManager, ABC):
 
     def _fetch_board_id(self) -> Optional[str]:
         logger.debug("Fetching board_id")
-        return self._evaluate(
+        result = self._evaluate(
             dedent(
                 """
         try:
             from machine import unique_id as __temp_uid
-            __thonny_helper.print_mgmt_value(__temp_uid())
+            __minny_helper.print_mgmt_value(__temp_uid())
             del __temp_uid
         except ImportError:
             try:
                 from board import board_id as __temp_board_id
-                __thonny_helper.print_mgmt_value(__temp_board_id)
+                __minny_helper.print_mgmt_value(__temp_board_id)
                 del __temp_board_id
             except ImportError:
-                __thonny_helper.print_mgmt_value(None)
+                __minny_helper.print_mgmt_value(None)
         """
             )
         )
+        if isinstance(result, bytes):
+            return binascii.hexlify(result).decode()
+        else:
+            assert result is None or isinstance(result, str)
+            return result
 
     def _fetch_sys_path(self):
         if not self._supports_directories():
             return []
         else:
-            return self._evaluate("__thonny_helper.sys.path")
+            return self._evaluate("__minny_helper.sys.path")
 
     def _fetch_epoch_year(self):
         if self._using_simplified_micropython():
@@ -1210,10 +1266,10 @@ class ProperTargetManager(TargetManager, ABC):
                 """
             try:
                 from time import localtime as __thonny_localtime
-                __thonny_helper.print_mgmt_value(__thonny_helper.builtins.tuple(__thonny_localtime(%d)))
+                __minny_helper.print_mgmt_value(__minny_helper.builtins.tuple(__thonny_localtime(%d)))
                 del __thonny_localtime
-            except __thonny_helper.builtins.Exception as e:
-                __thonny_helper.print_mgmt_value(__thonny_helper.builtins.str(e))
+            except __minny_helper.builtins.Exception as e:
+                __minny_helper.print_mgmt_value(__minny_helper.builtins.str(e))
         """
                 % Y2000_EPOCH_OFFSET
             )
@@ -1282,7 +1338,19 @@ class ProperTargetManager(TargetManager, ABC):
                 logger.warning("Unexpected echo. Expected %r, got %r" % (bdata, echo))
             self._connection.unread(echo)
 
-    def _execute(self, script, capture_output=False) -> Tuple[str, str]:
+    def execute_repl_entry(self, source: str) -> None:
+        source = _add_expression_statement_handlers(source)
+        source = _replace_last_repl_value_variables(source)
+        report_time("befexeccc")
+        self._execute(source, capture_output=False)
+        self._is_prepared = None  # may cause restart. TODO: should we be so careful?
+        self._sys_path = None
+        self._cwd = None  # TODO: should we recompute and report new value?
+        report_time("affexeccc")
+
+    def _execute(
+        self, script: str, capture_output: bool = False, require_helper: bool = True
+    ) -> Tuple[str, str]:
         if capture_output:
             output_lists: Dict[str, List[str]] = {"stdout": [], "stderr": []}
 
@@ -1290,16 +1358,18 @@ class ProperTargetManager(TargetManager, ABC):
                 assert isinstance(data, str)
                 output_lists[stream_name].append(data)
 
-            self._execute_with_consumer(script, consume_output)
+            self._execute_with_consumer(script, consume_output, require_helper=require_helper)
             result = ["".join(output_lists[name]) for name in ["stdout", "stderr"]]
             return result[0], result[1]
         else:
-            self._execute_with_consumer(script, self._io_handler._send_output)
+            self._execute_with_consumer(
+                script, self._io_handler._send_output, require_helper=require_helper
+            )
             return "", ""
 
-    def _execute_without_output(self, script):
+    def _execute_without_output(self, script: str, require_helper: bool = True) -> None:
         """Meant for management tasks."""
-        out, err = self._execute(script, capture_output=True)
+        out, err = self._execute(script, capture_output=True, require_helper=require_helper)
         if out or err:
             raise ManagementError("Command output was not empty", script, out, err)
 
@@ -1327,7 +1397,7 @@ class ProperTargetManager(TargetManager, ABC):
         already contain printing code"""
         try:
             ast.parse(script, mode="eval")
-            prefix = "__thonny_helper.print_mgmt_value("
+            prefix = "__minny_helper.print_mgmt_value("
             suffix = ")"
             if not script.strip().startswith(prefix):
                 script = prefix + script + suffix
@@ -1378,6 +1448,8 @@ class ProperTargetManager(TargetManager, ABC):
 
             met_prompt = True
             self._is_prepared = False
+            self._cwd = None
+            self._sys_path = None
 
             # hide the prompt from the output ...
             data = data[: -len(prompt)]
@@ -1394,9 +1466,24 @@ class ProperTargetManager(TargetManager, ABC):
             f"__minny_helper.print_mgmt_value(__minny_helper.os.listdir({path!r}))"
         )
 
+    def mkdir_in_existing_parent_exists_ok(self, path: str) -> None:
+        return self._mkdir_in_existing_parent_exists_ok_via_repl(path)
+
+    def _mkdir_in_existing_parent_exists_ok_via_repl(self, path: str) -> None:
+        self._execute_without_output(
+            dedent(
+                f"""
+            try:
+                __minny_helper.os.stat({path!r}) and None
+            except __minny_helper.builtins.OSError:
+                __minny_helper.os.mkdir({path!r})
+        """
+            )
+        )
+
     def _mkdir(self, path: str) -> None:
         # assumes part path exists and path doesn't
-        self._execute_without_output("__thonny_helper.os.mkdir(%r)" % path)
+        self._execute_without_output("__minny_helper.os.mkdir(%r)" % path)
 
     def remove_dir_if_empty(self, path: str) -> bool:
         return self._remove_dir_if_empty_via_repl(path)
@@ -1454,7 +1541,7 @@ class ProperTargetManager(TargetManager, ABC):
         hex_mode = self._should_hexlify(source_path)
 
         self._execute_without_output(
-            "__thonny_fp = __thonny_helper.builtins.open(%r, 'rb')" % source_path
+            "__thonny_fp = __minny_helper.builtins.open(%r, 'rb')" % source_path
         )
         if hex_mode:
             self._execute_without_output("from binascii import hexlify as __temp_hexlify")
@@ -1523,7 +1610,7 @@ class ProperTargetManager(TargetManager, ABC):
                 """
                 __thonny_path = '{path}'
                 __thonny_written = 0
-                __thonny_fp = __thonny_helper.builtins.open(__thonny_path, 'wb')
+                __thonny_fp = __minny_helper.builtins.open(__thonny_path, 'wb')
             """
             ).format(path=target_path),
             capture_output=True,
@@ -1547,8 +1634,8 @@ class ProperTargetManager(TargetManager, ABC):
                     global __thonny_written
                     __thonny_written += __thonny_fp.write(__thonny_unhex(x))
                     __thonny_fp.flush()
-                    if __thonny_helper.builtins.hasattr(__thonny_helper.os, "sync"):
-                        __thonny_helper.os.sync()
+                    if __minny_helper.builtins.hasattr(__minny_helper.os, "sync"):
+                        __minny_helper.os.sync()
             """
                 )
             )
@@ -1571,8 +1658,8 @@ class ProperTargetManager(TargetManager, ABC):
                     global __thonny_written
                     __thonny_written += __thonny_fp.write(x)
                     __thonny_fp.flush()
-                    if __thonny_helper.builtins.hasattr(__thonny_helper.os, "sync"):
-                        __thonny_helper.os.sync()
+                    if __minny_helper.builtins.hasattr(__minny_helper.os, "sync"):
+                        __minny_helper.os.sync()
             """
                 )
             )
@@ -1636,17 +1723,18 @@ class ProperTargetManager(TargetManager, ABC):
         self._delete_recursively_via_repl(paths)
 
     def _delete_recursively_via_repl(self, paths: List[str]) -> None:
+        paths = sorted(paths, key=len, reverse=True)
         self._execute_without_output(
             dedent(
                 """
             def __thonny_delete(path):
-                if __thonny_helper.os.stat(path)[0] & 0o170000 == 0o040000:
-                    for name in __thonny_helper.listdir(path):
+                if __minny_helper.os.stat(path)[0] & 0o170000 == 0o040000:
+                    for name in __minny_helper.listdir(path):
                         child_path = path + "/" + name
                         __thonny_delete(child_path)
-                    __thonny_helper.rmdir(path)
+                    __minny_helper.rmdir(path)
                 else:
-                    __thonny_helper.os.remove(path)
+                    __minny_helper.os.remove(path)
 
             for __thonny_path in %r: 
                 __thonny_delete(__thonny_path)
@@ -1668,9 +1756,9 @@ class ProperTargetManager(TargetManager, ABC):
             dedent(
                 """
             try:
-                __minny_helper.print_mgmt_value(__thonny_helper.os.%s(%r))
+                __minny_helper.print_mgmt_value(__minny_helper.os.%s(%r))
             except __minny_helper.builtins.OSError as e:
-                if e.args[0] == 2 # ENOENT:
+                if e.args[0] == 2: # ENOENT
                     __minny_helper.print_mgmt_value(None)
                 else:
                     raise
@@ -1683,25 +1771,25 @@ class ProperTargetManager(TargetManager, ABC):
             return None
 
         elif isinstance(value, int):
-            size = value
-            n = os.stat_result.n_sequence_fields
             mode = stat.S_IFREG | 0o644
 
-            base = [
+            value = (
                 mode,
                 0,  # st_ino
                 0,  # st_dev
                 1,  # st_nlink
                 0,  # st_uid
                 0,  # st_gid
-                size,
+                value,
                 0,  # st_atime
                 0,  # st_mtime
                 0,  # st_ctime
-            ]
+            )
 
+        if isinstance(value, tuple):
+            n = os.stat_result.n_sequence_fields
             # Pad with zeros for any extra platform-specific fields
-            seq = base + [0] * max(0, n - len(base))
+            seq = value + (0,) * max(0, n - len(value))
             return os.stat_result(seq)
         else:
             return value
@@ -1772,17 +1860,48 @@ class ProperTargetManager(TargetManager, ABC):
             "readonly" in canonic_out or "errno 30" in canonic_out or "oserror: 30" in canonic_out
         )
 
+    def _prepare_disconnect(self):
+        logger.info("Preparing disconnect")
+        self._connection.stop_reader()
+        self._write(NORMAL_MODE_CMD)
 
-class ProtocolError(RuntimeError):
-    pass
+    def run_user_program_via_repl(
+        self,
+        source: str,
+        restart_interpreter_before_run: bool,
+        populate_argv: bool,
+        argv: List[str],
+    ) -> None:
+        if restart_interpreter_before_run:
+            self._restart_interpreter()
 
+        if self._submit_mode == PASTE_SUBMIT_MODE:
+            source = _avoid_printing_expression_statements(source)
+            if restart_interpreter_before_run:
+                logger.debug("Ensuring normal mode after soft reboot")
+                self._ensure_normal_mode(force=True)
 
-class ManagementError(ProtocolError):
-    def __init__(self, msg, script, out, err):
-        RuntimeError.__init__(self, msg)
-        self.script = script
-        self.out = out
-        self.err = err
+        if populate_argv:
+            # Let the program know that it runs via %Run
+            argv_updater = textwrap.dedent(
+                f"""
+            try:
+                import sys as _thonny_sys
+                _thonny_sys.argv[:] = {argv}
+                del __thonny_sys
+            except:
+                pass
+            """
+            ).strip()
+            self._execute(argv_updater, capture_output=False)
+
+        self._execute(source, capture_output=False)
+
+        if restart_interpreter_before_run:
+            self._is_prepared = False
+
+        self._cwd = None  # TODO: should we recompute and report new value?
+        self._sys_path = None
 
 
 class RawPasteNotSupportedError(RuntimeError):
@@ -1907,7 +2026,7 @@ def _replace_last_repl_value_variables(source: str) -> str:
     for node in reversed(load_nodes):
         lines[node.lineno - 1] = (
             lines[node.lineno - 1][: node.col_offset]
-            + "__thonny_helper.builtins.globals().get('_', __thonny_helper.last_non_none_repl_value)"
+            + "__minny_helper.builtins.globals().get('_', __minny_helper.last_non_none_repl_value)"
             + lines[node.lineno - 1][node.col_offset + 1 :]
         )
 
@@ -1937,7 +2056,7 @@ def _add_expression_statement_handlers(source):
             if isinstance(node, ast.Expr) and not getattr(node, "guarded", False):
                 expr_stmts.append(node)
 
-        marker_prefix = "__thonny_helper.print_repl_value("
+        marker_prefix = "__minny_helper.print_repl_value("
         marker_suffix = ")"
 
         lines = source.splitlines(keepends=True)
@@ -1966,7 +2085,9 @@ def _add_expression_statement_handlers(source):
 
 
 def _avoid_printing_expression_statements(source):
-    # temporary solution for https://github.com/thonny/thonny/issues/1441
+    # In paste mode, the expression statements inside with-blocks (perhaps in other blocks as well)
+    # cause the values to be printed. (On toplevel the printing is suppressed)
+    # See https://github.com/thonny/thonny/issues/1441
     try:
         root = ast.parse(source)
 

@@ -115,7 +115,7 @@ class DirTargetManager(TargetManager):
         return ["/"]
 
     def get_sys_implementation(self) -> Dict[str, Any]:
-        return {"name": "micropython", "version": "1.27", "_mpy": None}
+        return {"name": "micropython", "version": (1, 27, 0), "_mpy": None}
 
     def get_default_target(self) -> str:
         return "/"

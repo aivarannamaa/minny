@@ -3,6 +3,7 @@ import os.path
 from logging import getLogger
 from typing import Any, Dict, List, Optional, Tuple
 
+from minny import get_default_minny_cache_dir
 from minny.circup import CircupInstaller
 from minny.common import UserError
 from minny.compiling import Compiler
@@ -22,15 +23,15 @@ class ProjectManager:
     def __init__(
         self,
         project_dir: str,
-        minny_cache_dir: str,
         tmgr: TargetManager,
         tracker: Tracker,
         compiler: Compiler,
+        minny_cache_dir: Optional[str] = None,
     ):
         self._project_dir = project_dir
         self._lib_dir = os.path.join(self._project_dir, "lib")
         self._lib_dir_mgr = DirTargetManager(self._lib_dir)
-        self._minny_cache_dir = minny_cache_dir
+        self._minny_cache_dir = minny_cache_dir or get_default_minny_cache_dir()
         self._tmgr = tmgr
         self._target_tracker = tracker
         self._dummy_tracker = DummyTracker(self._lib_dir_mgr)
@@ -55,15 +56,15 @@ class ProjectManager:
         print("syncing")
         self._sync_dependencies()
 
-    def deploy(self, mpy_cross_path: Optional[str], **kwargs):
-        self._deploy(mpy_cross_path, except_main=False)
+    def deploy(self, mpy_cross_path: Optional[str] = None, except_main: bool = False, **kwargs):
+        self._deploy(mpy_cross_path, except_main=except_main)
 
     def run(self, script_path: str, mpy_cross_path: Optional[str], **kwargs):
         self._deploy(mpy_cross_path, except_main=True)
         # TODO: self._tmgr.exec()
 
     def _deploy(self, mpy_cross_path: Optional[str], except_main: bool):
-        compiler = Compiler(self._tmgr, self._minny_cache_dir, mpy_cross_path)
+        compiler = Compiler(self._tmgr, mpy_cross_path, self._minny_cache_dir)
         self._sync_dependencies()
         self._deploy_packages(compiler)
         self._deploy_files(compiler, except_main=False)

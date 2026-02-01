@@ -10,9 +10,9 @@ from minny.target import PASTE_SUBMIT_MODE, ProperTargetManager
 
 class OsTargetManager(ProperTargetManager, ABC):
     def __init__(self, interpreter: str):
-        self._interpreter = interpreter
+        self._interpreter = self._resolve_executable(interpreter)
         super().__init__(
-            self._create_connection([]),
+            self._create_connection(interpreter, []),
             submit_mode=PASTE_SUBMIT_MODE,
             write_block_size=None,
             write_block_delay=None,
@@ -29,7 +29,13 @@ class OsTargetManager(ProperTargetManager, ABC):
         pass
 
     def _restart_interpreter(self) -> None:
-        pass
+        # TODO
+        self._is_prepared = False
+        self._sys_path = None
+        raise NotImplementedError("TODO")
+
+    def _extract_block_without_splitting_chars(self, source_bytes: bytes) -> bytes:
+        return source_bytes
 
     def _resolve_executable(self, executable):
         result = self._which(executable)
@@ -45,7 +51,9 @@ class OsTargetManager(ProperTargetManager, ABC):
     def _which(self, executable: str) -> Optional[str]: ...
 
     @abstractmethod
-    def _create_connection(self, run_args: List[str]) -> MicroPythonConnection: ...
+    def _create_connection(
+        self, interpreter: str, launch_args: List[str]
+    ) -> MicroPythonConnection: ...
 
     def _tweak_welcome_text(self, original: str) -> str:
         return (
@@ -105,7 +113,7 @@ class OsTargetManager(ProperTargetManager, ABC):
     def _get_utc_timetuple_from_device(
         self,
     ) -> Union[Tuple[int, ...], str]:
-        out, err = self._execute("__thonny_helper.os.system('date -u +%s')", capture_output=True)
+        out, err = self._execute("__minny_helper.os.system('date -u +%s')", capture_output=True)
         if err:
             return err
 
@@ -120,10 +128,10 @@ class OsTargetManager(ProperTargetManager, ABC):
 
 
 class LocalOsTargetManager(OsTargetManager):
-    def _create_connection(self, run_args: List[str]) -> MicroPythonConnection:
+    def _create_connection(self, interpreter: str, launch_args: List[str]) -> MicroPythonConnection:
         from minny.subprocess_connection import SubprocessConnection
 
-        return SubprocessConnection(self._interpreter, ["-i"] + run_args)
+        return SubprocessConnection(interpreter, ["-i"] + launch_args)
 
     def _which(self, executable: str) -> Optional[str]:
         import shutil

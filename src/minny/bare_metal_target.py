@@ -4,7 +4,7 @@ import threading
 import time
 from logging import getLogger
 from textwrap import dedent, indent
-from typing import BinaryIO, Callable, Tuple, Union
+from typing import BinaryIO, Callable, List, Tuple, Union
 
 from minny.common import ManagementError
 from minny.target import (
@@ -90,6 +90,15 @@ class BareMetalTargetManager(ProperTargetManager):
         else:
             return 2000
 
+    def launch_main_program(self) -> None:
+        # Need to go to normal mode. MP doesn't run user code in raw mode
+        # (CP does, but it doesn't hurt to do it there as well)
+        logger.info("_soft_reboot_for_restarting_user_program")
+        self._ensure_normal_mode()
+        self._write(SOFT_REBOOT_CMD)
+        self._is_prepared = False
+        self._check_reconnect()
+
     def sync_rtc(self) -> None:
         """Sets the time to match the time on the host."""
 
@@ -140,9 +149,9 @@ class BareMetalTargetManager(ProperTargetManager):
             """
                 try:
                 %s
-                    __thonny_helper.print_mgmt_value(True)
-                except __thonny_helper.builtins.Exception as e:
-                    __thonny_helper.print_mgmt_value(__thonny_helper.builtins.str(e))
+                    __minny_helper.print_mgmt_value(True)
+                except __minny_helper.builtins.Exception as e:
+                    __minny_helper.print_mgmt_value(__minny_helper.builtins.str(e))
             """
         ) % indent(specific_script, "    ")
 
@@ -159,7 +168,7 @@ class BareMetalTargetManager(ProperTargetManager):
             specific_script = dedent(
                 """
                 from rtc import RTC as __thonny_RTC
-                __thonny_helper.print_mgmt_value(__thonny_helper.builtins.tuple(__thonny_RTC().datetime)[:6])
+                __minny_helper.print_mgmt_value(__minny_helper.builtins.tuple(__thonny_RTC().datetime)[:6])
                 del __thonny_RTC
                 """
             )
@@ -169,12 +178,12 @@ class BareMetalTargetManager(ProperTargetManager):
                 from machine import RTC as __thonny_RTC
                 try:
                     # now() on some devices also gives weekday, so prefer datetime
-                    __thonny_temp = __thonny_helper.builtins.tuple(__thonny_RTC().datetime())
+                    __thonny_temp = __minny_helper.builtins.tuple(__thonny_RTC().datetime())
                     # remove weekday from index 3
-                    __thonny_helper.print_mgmt_value(__thonny_temp[0:3] + __thonny_temp[4:7])
+                    __minny_helper.print_mgmt_value(__thonny_temp[0:3] + __thonny_temp[4:7])
                     del __thonny_temp
                 except:
-                    __thonny_helper.print_mgmt_value(__thonny_helper.builtins.tuple(__thonny_RTC().now())[:6])
+                    __minny_helper.print_mgmt_value(__minny_helper.builtins.tuple(__thonny_RTC().now())[:6])
                 del __thonny_RTC
                 """
             )
@@ -183,8 +192,8 @@ class BareMetalTargetManager(ProperTargetManager):
             """
                 try:
                 %s
-                except __thonny_helper.builtins.Exception as e:
-                    __thonny_helper.print_mgmt_value(__thonny_helper.builtins.str(e))
+                except __minny_helper.builtins.Exception as e:
+                    __minny_helper.print_mgmt_value(__minny_helper.builtins.str(e))
             """
         ) % indent(specific_script, "    ")
 
@@ -197,15 +206,15 @@ class BareMetalTargetManager(ProperTargetManager):
             try:
                 try:
                     from time import localtime as __thonny_localtime
-                    __thonny_helper.print_mgmt_value(__thonny_helper.builtins.tuple(__thonny_localtime()))
+                    __minny_helper.print_mgmt_value(__minny_helper.builtins.tuple(__thonny_localtime()))
                     del __thonny_localtime
                 except:
                     # some CP boards
                     from rtc import RTC as __thonny_RTC
-                    __thonny_helper.print_mgmt_value(__thonny_helper.builtins.tuple(__thonny_RTC().datetime))
+                    __minny_helper.print_mgmt_value(__minny_helper.builtins.tuple(__thonny_RTC().datetime))
                     del __thonny_RTC
-            except __thonny_helper.builtins.Exception as e:
-                __thonny_helper.print_mgmt_value(__thonny_helper.builtins.str(e))
+            except __minny_helper.builtins.Exception as e:
+                __minny_helper.print_mgmt_value(__minny_helper.builtins.str(e))
         """
         )
 
@@ -223,7 +232,7 @@ class BareMetalTargetManager(ProperTargetManager):
             self._ensure_normal_mode()
             self._ensure_raw_mode()
         else:
-            """NB! assumes prompt and may be called without __thonny_helper"""
+            """NB! assumes prompt and may be called without __minny_helper"""
             logger.info("_create_fresh_repl")
             self._ensure_raw_mode()
             self._write(SOFT_REBOOT_CMD)
@@ -233,6 +242,8 @@ class BareMetalTargetManager(ProperTargetManager):
             self._check_reconnect()
             self._forward_output_until_active_prompt()
             logger.info("Done _create_fresh_repl")
+
+        self._is_prepared = False
 
     def _check_reconnect(self):
         if self._connected_over_webrepl():
@@ -255,7 +266,7 @@ class BareMetalTargetManager(ProperTargetManager):
                 dedent(
                     """
                 for __thonny_path in %r: 
-                    __thonny_helper.os.remove(__thonny_path)
+                    __minny_helper.os.remove(__thonny_path)
 
                 del __thonny_path
 
@@ -380,7 +391,9 @@ class BareMetalTargetManager(ProperTargetManager):
         callback: Callable[[int, int], None],
     ) -> int:
         mounted_target_path = self._internal_path_to_mounted_path(path)
-        return self._write_local_file_ex(mounted_target_path, source, file_size, callback)
+        result = self._write_local_file_ex(mounted_target_path, source, file_size, callback)
+        try_sync_local_filesystem()
+        return result
 
     def _write_file_via_webrepl_file_protocol(
         self,
@@ -430,8 +443,8 @@ class BareMetalTargetManager(ProperTargetManager):
         self._execute_without_output(
             dedent(
                 """
-            if __thonny_helper.builtins.hasattr(__thonny_helper.os, "sync"):
-                __thonny_helper.os.sync()        
+            if __minny_helper.builtins.hasattr(__minny_helper.os, "sync"):
+                __minny_helper.os.sync()        
         """
             )
         )
@@ -455,16 +468,7 @@ class BareMetalTargetManager(ProperTargetManager):
 
     def mkdir_in_existing_parent_exists_ok(self, path: str) -> None:
         # TODO: check for read only fs
-        self._execute_without_output(
-            dedent(
-                f"""
-            try:
-                __minny_helper.os.stat({path!r}) and None
-            except __minny_helper.builtins.OSError:
-                __minny_helper.os.mkdir({path!r})
-        """
-            )
-        )
+        self._mkdir_in_existing_parent_exists_ok_via_repl(path)
 
     def _makedirs_via_mount(self, path):
         mounted_path = self._internal_path_to_mounted_path(path)
@@ -517,7 +521,8 @@ class BareMetalTargetManager(ProperTargetManager):
             else:
                 raise
 
-    def _delete_recursively_via_mount(self, paths):
+    def _delete_recursively_via_mount(self, paths: List[str]):
+        paths = sorted(paths, key=len, reverse=True)
         for path in paths:
             mounted_path = self._internal_path_to_mounted_path(path)
             assert mounted_path is not None
@@ -544,12 +549,12 @@ class BareMetalTargetManager(ProperTargetManager):
                     __thonny_result = __thonny_getmount("/").label
                 finally:
                     del __thonny_getmount
-            except __thonny_helper.builtins.ImportError:
+            except __minny_helper.builtins.ImportError:
                 __thonny_result = None 
-            except __thonny_helper.builtins.OSError:
+            except __minny_helper.builtins.OSError:
                 __thonny_result = None 
 
-            __thonny_helper.print_mgmt_value(__thonny_result)
+            __minny_helper.print_mgmt_value(__thonny_result)
 
             del __thonny_result
             """

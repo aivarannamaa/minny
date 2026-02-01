@@ -16,8 +16,8 @@ class TestEditableParsing:
         tmgr = DummyTargetManager()
         cache_dir = tempfile.mkdtemp()
         tracker = Tracker(tmgr, cache_dir)
-        compiler = Compiler(tmgr, cache_dir, None)
-        return ProjectManager("/tmp/test_project", cache_dir, tmgr, tracker, compiler)
+        compiler = Compiler(tmgr, None, cache_dir)
+        return ProjectManager("/tmp/test_project", tmgr, tracker, compiler, cache_dir)
 
     def test_parse_regular_specs_only(self):
         """Test parsing when all specs are regular (no -e)."""

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import urlsplit
 
+from minny import get_default_minny_cache_dir
 from minny.common import UserError
 from minny.compiling import Compiler
 from minny.installer import Installer, PackageMetadata
@@ -77,8 +78,10 @@ class CircupInstaller(Installer):
         tmgr: TargetManager,
         tracker: Tracker,
         target_dir: Optional[str],
-        minny_cache_dir: str,
+        minny_cache_dir: Optional[str] = None,
     ):
+        if minny_cache_dir is None:
+            minny_cache_dir = get_default_minny_cache_dir()
         super().__init__(tmgr, tracker, target_dir, minny_cache_dir)
         self._cache_dir: str = os.path.join(minny_cache_dir, "circup")
         os.makedirs(self._cache_dir, exist_ok=True)
@@ -128,7 +131,7 @@ class CircupInstaller(Installer):
         **kwargs,
     ) -> None:
         self.validate_editables(editables)
-        compiler = Compiler(self._tmgr, self._minny_cache_dir, mpy_cross)
+        compiler = Compiler(self._tmgr, mpy_cross, self._minny_cache_dir)
         specs = specs or []
         requirement_files = requirement_files or []
         editables = editables or []

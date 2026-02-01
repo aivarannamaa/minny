@@ -10,17 +10,23 @@ import uuid
 import zlib
 from typing import Any, Dict, List, Optional
 from urllib.request import urlopen
+from logging import getLogger
 
+from minny import get_default_minny_cache_dir
 from minny.common import UserError
 from minny.target import TargetManager
 
+logger = getLogger(__name__)
 
 class Compiler:
     def __init__(
-        self, tmgr: TargetManager, minny_cache_dir: str, mpy_cross_path: Optional[str] = None
+        self,
+        tmgr: TargetManager,
+        mpy_cross_path: Optional[str] = None,
+        minny_cache_dir: Optional[str] = None,
     ):
         self._tmgr = tmgr
-        self._minny_cache_dir = minny_cache_dir
+        self._minny_cache_dir: str = minny_cache_dir or get_default_minny_cache_dir()
         self._user_mpy_cross_path = mpy_cross_path
         self._configuration_description: Optional[str] = None
 
@@ -45,7 +51,7 @@ class Compiler:
 
     def _get_path_with_options(self) -> List[str]:
         sys_implementation = self._tmgr.get_sys_implementation()
-        version_prefix = ".".join(sys_implementation["version"].split(".")[:2])
+        version_prefix = ".".join(map(str, sys_implementation["version"][:2]))
 
         if self._user_mpy_cross_path is not None:
             exe_path = self._user_mpy_cross_path

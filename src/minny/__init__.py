@@ -1,15 +1,14 @@
 import logging
-import os.path
 import subprocess
 import sys
 import traceback
 from typing import List, Optional
 
-from minny.common import ManagementError, UserError
+from minny.common import ManagementError, UserError, get_default_minny_cache_dir
 from minny.compiling import Compiler
 from minny.target import TargetManager, create_target_manager
 from minny.tracking import Tracker
-from minny.util import find_enclosing_project, get_user_cache_dir
+from minny.util import find_enclosing_project
 
 logger = logging.getLogger("minny")
 
@@ -31,7 +30,7 @@ def main(raw_args: Optional[List[str]] = None) -> int:
     from minny.project import ProjectManager
 
     args = parser.parse_arguments(raw_args)
-    cache_dir = os.path.join(get_user_cache_dir(), "minny")
+    cache_dir = get_default_minny_cache_dir()
 
     if args.verbose:
         logging_level = logging.DEBUG
@@ -72,8 +71,8 @@ def main(raw_args: Optional[List[str]] = None) -> int:
         else:
             project_dir = args.project or find_enclosing_project()
             assert project_dir is not None
-            compiler = Compiler(tmgr, cache_dir, args_dict.get("mpy_cross", None))
-            command_handler = ProjectManager(project_dir, cache_dir, tmgr, tracker, compiler)
+            compiler = Compiler(tmgr, args_dict.get("mpy_cross", None), cache_dir)
+            command_handler = ProjectManager(project_dir, tmgr, tracker, compiler, cache_dir)
             method = getattr(command_handler, args.main_command)
 
         method(**args_dict)

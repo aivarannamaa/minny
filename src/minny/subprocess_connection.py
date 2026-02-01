@@ -2,7 +2,7 @@ import signal
 import sys
 from typing import List, Optional, cast
 
-from .common import ALL_EXPLAINED_STATUS_CODE
+from .common import INTERNAL_ERROR_STATUS_CODE
 from .connection import MicroPythonConnection
 
 
@@ -14,7 +14,7 @@ class SubprocessConnection(MicroPythonConnection):
             import ptyprocess
         except ImportError:
             print("ERROR: Subprocess connection requires a Python package named 'ptyprocess'.")
-            sys.exit(ALL_EXPLAINED_STATUS_CODE)
+            sys.exit(INTERNAL_ERROR_STATUS_CODE)
 
         super().__init__()
         cmd = [executable] + args

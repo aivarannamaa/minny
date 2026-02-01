@@ -48,9 +48,9 @@ def test_sync_command(snapshot):
 
     cache_dir = tempfile.mkdtemp()
     tmgr = DummyTargetManager()
-    compiler = Compiler(tmgr, cache_dir, None)
+    compiler = Compiler(tmgr, None, cache_dir)
     tracker = Tracker(tmgr, minny_cache_dir=cache_dir)
-    project_manager = ProjectManager(str(project_dir), cache_dir, tmgr, tracker, compiler)
+    project_manager = ProjectManager(str(project_dir), tmgr, tracker, compiler, cache_dir)
     project_manager.sync()
 
     # Verify lib directory was created

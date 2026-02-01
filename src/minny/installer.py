@@ -6,6 +6,7 @@ from copy import deepcopy
 from logging import getLogger
 from typing import Dict, List, NotRequired, Optional, TypedDict
 
+from minny import get_default_minny_cache_dir
 from minny.common import UserError
 from minny.compiling import Compiler
 from minny.dir_target import DirTargetManager
@@ -62,11 +63,11 @@ class Installer(ABC):
         tmgr: TargetManager,
         tracker: Tracker,
         target_dir: Optional[str],
-        minny_cache_dir: str,
+        minny_cache_dir: Optional[str] = None,
     ):
         self._tmgr = tmgr
         self._tracker = tracker
-        self._minny_cache_dir = minny_cache_dir
+        self._minny_cache_dir = minny_cache_dir or get_default_minny_cache_dir()
         self._custom_target_dir: Optional[str] = target_dir
         self._quiet = False
         self._tty = False

@@ -5,6 +5,7 @@ import zlib
 from logging import getLogger
 from typing import Dict, List, NotRequired, Optional, TypedDict
 
+from minny import get_default_minny_cache_dir
 from minny.compiling import Compiler
 from minny.target import TargetManager
 from minny.util import parse_json_file
@@ -29,9 +30,9 @@ SingleInstallerTrackedPackages = Dict[str, TrackedPackageInfo]  # key is package
 
 
 class Tracker:
-    def __init__(self, tmgr: TargetManager, minny_cache_dir: str):
+    def __init__(self, tmgr: TargetManager, minny_cache_dir: Optional[str] = None):
         self._tmgr = tmgr
-        self._minny_cache_dir = minny_cache_dir
+        self._minny_cache_dir: str = minny_cache_dir or get_default_minny_cache_dir()
         self._tracked_files: Dict[str, TrackedFileInfo] = {}  # key is target path
         self._tracked_packages_by_installer: Dict[
             str, SingleInstallerTrackedPackages
