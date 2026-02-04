@@ -284,6 +284,10 @@ class TargetManager(ABC):
         return bytes_written
 
     @abstractmethod
+    def mkdir(self, path: str) -> None:
+        """assumes parent path exists and path doesn't"""
+
+    @abstractmethod
     def mkdir_in_existing_parent_exists_ok(self, path: str) -> None: ...
 
 
@@ -1481,8 +1485,8 @@ class ProperTargetManager(TargetManager, ABC):
             )
         )
 
-    def _mkdir(self, path: str) -> None:
-        # assumes part path exists and path doesn't
+    def mkdir(self, path: str) -> None:
+        # assumes parent path exists and path doesn't
         self._execute_without_output("__minny_helper.os.mkdir(%r)" % path)
 
     def remove_dir_if_empty(self, path: str) -> bool:

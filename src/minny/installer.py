@@ -8,7 +8,7 @@ from typing import Dict, List, NotRequired, Optional, TypedDict
 
 from minny import get_default_minny_cache_dir
 from minny.common import UserError
-from minny.compiling import Compiler
+from minny.compiling import Compiler, get_module_format
 from minny.dir_target import DirTargetManager
 from minny.target import TargetManager
 from minny.tracking import TrackedPackageInfo, Tracker
@@ -171,9 +171,6 @@ class Installer(ABC):
             else:
                 print(f"{info.name} {info.version}")
 
-    def get_module_format(self, compile: bool, compiler: Compiler) -> str:
-        return compiler.get_module_format() if compile else "py"
-
     def tweak_editable_project_path(
         self, meta: PackageMetadata, original_spec: Optional[str]
     ) -> None:
@@ -202,15 +199,21 @@ class Installer(ABC):
             ).replace("\\", "/")
             meta["editable"]["project_path"] = from_spec_rel_project_path
 
-    def save_package_metadata(self, rel_meta_path: str, meta: PackageMetadata) -> None:
-        # TODO: order attributes
+    def save_package_metadata(
+        self, rel_meta_path: str, meta: PackageMetadata, module_format: str
+    ) -> None:
         full_path = self._tmgr.join_path(
             self.get_target_dir(),
             rel_meta_path,
         )
-
-        content = json.dumps(meta).encode(META_ENCODING)
+        content = self.compile_package_metadata(meta, module_format)
         self._tracker.smart_write_to_tracked_file(full_path, content)
+
+    def compile_package_metadata(self, meta: PackageMetadata, module_format: str) -> bytes:
+        # Record some extra information so that we can determine installation's compatibility later
+        data = dict(meta)
+        data["module_format"] = module_format
+        return json.dumps(data, sort_keys=True).encode(META_ENCODING)
 
     def get_installed_package_infos(self) -> Dict[str, PackageInstallationInfo]:
         rel_meta_dir = f".{self.get_installer_name()}"
@@ -242,6 +245,7 @@ class Installer(ABC):
     def get_package_latest_version(self, name: str) -> Optional[str]: ...
 
     def parse_meta_file_path(self, meta_file_path: str) -> PackageInstallationInfo:
+        logger.debug(f"Parsing meta file path {meta_file_path}")
         _, meta_file_name = self._tmgr.split_dir_and_basename(meta_file_path)
         assert meta_file_name is not None
         assert meta_file_name.endswith(META_FILE_SUFFIX)
@@ -324,49 +328,29 @@ class Installer(ABC):
         canonical_name = source_package_info.name
         logger.debug(f"check-deploying package '{canonical_name}'")
 
-        # Do we have tracked information about the same package version compiled with the same way?
-        matching_installation = self._tracker.get_matching_installation(
-            self.get_installer_name(),
-            canonical_name,
-            source_package_meta["version"],
-            compile,
-            compiler,
+        # Might there be another version of the same package installed? We need to know the installed files so that
+        # we can delete obsolete files after deployment.
+        previous_installation_files: List[str] = []
+
+        # Usually this method gets called when the correct package version is installed and tracked.
+        # This is the case we need to optimize, so we first try the tracker, not the filesystem.
+        previous_tracked_installation = self._tracker.get_package_installation_info(
+            self.get_installer_name(), canonical_name
         )
-
-        if matching_installation is not None and not source_package_meta.get("editable", False):
-            logger.info(f"Matching installation of {canonical_name} exists according to tracker")
-            return matching_installation["files"]
-
-        # Perhaps we don't have tracking information, but the same package is still installed?
-        installed_package_info = self.get_package_installed_info(canonical_name)
-        intended_module_format = self.get_module_format(compile, compiler)
-        if installed_package_info is not None:
-            if installed_package_info.version != source_package_info.version:
-                logger.info(
-                    f"{canonical_name} is currently installed with wrong version ({installed_package_info.version})"
-                )
-                self._uninstall_package(canonical_name)
-            elif installed_package_info.module_format != intended_module_format:
-                logger.info(
-                    f"{canonical_name} is currently installed with different module format ({installed_package_info.module_format})"
-                )
-                self._uninstall_package(canonical_name)
+        if previous_tracked_installation is not None:
+            logger.debug(f"{canonical_name} already installed (according to the tracker)")
+            previous_installation_files = previous_tracked_installation["files"]
+        else:
+            # the package may still be installed, just not tracked
+            previous_real_installation = self.get_package_installed_info(canonical_name)
+            if previous_real_installation is not None:
+                logger.debug(f"{canonical_name} already installed (according to the filesystem)")
+                previous_real_meta = self.load_package_metadata(previous_real_installation)
+                previous_installation_files = previous_real_meta["files"]
             else:
-                assert os.path.basename(source_package_info.rel_meta_file_path) == os.path.basename(
-                    installed_package_info.rel_meta_file_path
-                )
-                if source_package_meta["editable"]:
-                    logger.debug(
-                        f"{canonical_name} is currently installed but needs attention because source is editable"
-                    )
-                    # TODO: remove files present at target but not present at the source
-                else:
-                    logger.info(f"Matching installation of {canonical_name} exists on the device")
-                    # TODO: check paths' relativity
-                    target_meta = self.load_package_metadata(installed_package_info)
-                    return target_meta["files"]
+                logger.debug("No version of the package installed yet")
 
-        return self._deploy_locally_installed_package(
+        new_installation_files = self._deploy_locally_installed_package(
             source_package_info,
             source_package_meta,
             source_dir,
@@ -374,6 +358,13 @@ class Installer(ABC):
             compile,
             compiler,
         )
+
+        for file in previous_installation_files:
+            if file not in new_installation_files:
+                print(f"Removing obsolete file {file}")
+                self._tracker.remove_file_if_exists(file)
+
+        return new_installation_files
 
     def _deploy_locally_installed_package(
         self,
@@ -384,6 +375,7 @@ class Installer(ABC):
         compile: bool,
         compiler: Compiler,
     ) -> List[str]:
+        logger.info(f"Start deploying package {source_package_info}")
         target_metadata = deepcopy(source_package_meta)
         target_metadata["files"] = []
 
@@ -416,16 +408,19 @@ class Installer(ABC):
             )
             target_metadata["files"].append(final_target_rel_path)
 
-        rel_meta_path = source_package_info.rel_meta_file_path
-        target_metadata["files"].append(rel_meta_path)
-        self.save_package_metadata(rel_meta_path, target_metadata)
+        target_module_format = get_module_format(compile, compiler)
+        target_rel_meta_path = self.get_relative_metadata_path(
+            source_package_info.name, source_package_info.version, target_module_format
+        )
+        target_metadata["files"].append(target_rel_meta_path)
+        self.save_package_metadata(target_rel_meta_path, target_metadata, target_module_format)
 
         self._tracker.register_package_install(
             self.get_installer_name(),
             canonical_name,
             TrackedPackageInfo(
                 version=target_metadata["version"],
-                module_format=self.get_module_format(compile, compiler),
+                module_format=target_module_format,
                 files=target_metadata["files"],
             ),
         )

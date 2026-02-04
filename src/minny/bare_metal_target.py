@@ -452,15 +452,15 @@ class BareMetalTargetManager(ProperTargetManager):
     def get_dir_sep(self) -> str:
         return "/"
 
-    def _mkdir(self, path):
+    def mkdir(self, path):
         if path == "/":
             return
 
         try:
-            super()._mkdir(path)
+            super().mkdir(path)
         except ManagementError as e:
             if self._contains_read_only_error(e.err):
-                self._makedirs_via_mount(path)
+                self._mkdir_via_mount(path)
             else:
                 raise
 
@@ -470,10 +470,10 @@ class BareMetalTargetManager(ProperTargetManager):
         # TODO: check for read only fs
         self._mkdir_in_existing_parent_exists_ok_via_repl(path)
 
-    def _makedirs_via_mount(self, path):
+    def _mkdir_via_mount(self, path):
         mounted_path = self._internal_path_to_mounted_path(path)
         assert mounted_path is not None, "Couldn't find mounted path for " + path
-        os.makedirs(mounted_path, exist_ok=True)
+        os.mkdir(mounted_path)
         try_sync_local_filesystem()
 
     def remove_dir_if_empty(self, path: str) -> bool:

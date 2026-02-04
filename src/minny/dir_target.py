@@ -11,6 +11,9 @@ logger = getLogger(__name__)
 
 
 class DirTargetManager(TargetManager):
+    def mkdir(self, path: str) -> None:
+        os.mkdir(path)
+
     def __init__(self, base_path: str):
         if os.path.isfile(base_path):
             raise UserError("base_path should not be a file")

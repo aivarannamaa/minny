@@ -33,7 +33,7 @@ class Tracker:
     def __init__(self, tmgr: TargetManager, minny_cache_dir: Optional[str] = None):
         self._tmgr = tmgr
         self._minny_cache_dir: str = minny_cache_dir or get_default_minny_cache_dir()
-        self._tracked_files: Dict[str, TrackedFileInfo] = {}  # key is target path
+        self._tracked_files: Dict[str, TrackedFileInfo] = {}  # key is abs target path
         self._tracked_packages_by_installer: Dict[
             str, SingleInstallerTrackedPackages
         ] = {}  # key is installer name
@@ -138,11 +138,12 @@ class Tracker:
             logger.debug(f"Skip writing '{target_path}' (checked crc32 not changed)")
         else:
             logger.info(
-                f"Writing {len(content)} bytes to '{target_path}' (checked crc32={checked_crc32}"
+                f"Writing {len(content)} bytes to '{target_path}' (checked crc32={checked_crc32})"
             )
             self._tmgr.ensure_dir_and_write_file(target_path, content)
 
         self._tracked_files[target_path] = TrackedFileInfo(crc32=source_crc32)
+        self._save_tracking_info()
 
     def register_package_install(
         self, installer_name: str, canonical_package_name: str, package_info: TrackedPackageInfo
@@ -176,15 +177,13 @@ class Tracker:
         installer_name: str,
         canonical_package_name: str,
         version: str,
-        compile: bool,
-        compiler: Compiler,
+        module_format: str,
     ) -> Optional[TrackedPackageInfo]:
-        required_mpy_cross_conf = compiler.get_module_format() if compile else None
         package_info = self.get_package_installation_info(installer_name, canonical_package_name)
         if (
             package_info is not None
             and package_info["version"] == version
-            and package_info.get("mpy_cross") == required_mpy_cross_conf
+            and package_info["module_format"] == module_format
         ):
             return package_info
 

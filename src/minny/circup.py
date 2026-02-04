@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 
 from minny import get_default_minny_cache_dir
 from minny.common import UserError
-from minny.compiling import Compiler
+from minny.compiling import Compiler, get_module_format
 from minny.installer import Installer, PackageMetadata
 from minny.settings import SettingsReader
 from minny.target import TargetManager
@@ -254,7 +254,8 @@ class CircupInstaller(Installer):
             self.tweak_editable_project_path(meta, spec)
             rel_meta_path = self.get_relative_metadata_path(meta["name"], meta["version"], "py")
             meta["files"].append(rel_meta_path)
-            self.save_package_metadata(rel_meta_path, meta)
+            module_format = get_module_format(compile, compiler)
+            self.save_package_metadata(rel_meta_path, meta, module_format)
         else:
             temp_build_path = tempfile.mkdtemp()
 
@@ -377,11 +378,11 @@ class CircupInstaller(Installer):
         deps = self._find_package_deps_from_source(build_path, canonical_name)
         meta["dependencies"] = deps
 
-        module_format = self.get_module_format(compile, compiler)
+        module_format = get_module_format(compile, compiler)
 
         meta_path = self.get_relative_metadata_path(canonical_name, version, module_format)
         meta["files"].append(meta_path)
-        self.save_package_metadata(meta_path, meta)
+        self.save_package_metadata(meta_path, meta, module_format)
         self._tracker.register_package_install(
             self.get_installer_name(),
             canonical_name,

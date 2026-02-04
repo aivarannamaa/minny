@@ -8,15 +8,16 @@ import tempfile
 import urllib.request
 import uuid
 import zlib
+from logging import getLogger
 from typing import Any, Dict, List, Optional
 from urllib.request import urlopen
-from logging import getLogger
 
 from minny import get_default_minny_cache_dir
 from minny.common import UserError
 from minny.target import TargetManager
 
 logger = getLogger(__name__)
+
 
 class Compiler:
     def __init__(
@@ -28,7 +29,7 @@ class Compiler:
         self._tmgr = tmgr
         self._minny_cache_dir: str = minny_cache_dir or get_default_minny_cache_dir()
         self._user_mpy_cross_path = mpy_cross_path
-        self._configuration_description: Optional[str] = None
+        self._configuration_hash: Optional[str] = None
 
     def compile_to_bytes(self, source_path: str) -> bytes:
         temp_path = os.path.join(tempfile.gettempdir(), str(uuid.uuid4()))
@@ -44,10 +45,10 @@ class Compiler:
         subprocess.check_call(args, executable=args[0], stdin=subprocess.DEVNULL)
 
     def get_module_format(self) -> str:
-        if self._configuration_description is None:
-            self._configuration_description = self._compute_configuration_description()
+        if self._configuration_hash is None:
+            self._configuration_hash = self._compute_configuration_hash()
 
-        return self._configuration_description
+        return self._configuration_hash
 
     def _get_path_with_options(self) -> List[str]:
         sys_implementation = self._tmgr.get_sys_implementation()
@@ -70,16 +71,18 @@ class Compiler:
             self._download_mpy_cross(implementation_name, version_prefix, path)
         return path
 
-    def _compute_configuration_description(self) -> str:
+    def _compute_configuration_hash(self) -> str:
         path_with_options = self._get_path_with_options()
         exe_path = path_with_options[0]
         options = path_with_options[1:]
         assert os.path.exists(exe_path)
 
         with open(exe_path, "rb") as fp:
-            exe_descriptor = f"crc32={zlib.crc32(fp.read())}"
+            crc32 = zlib.crc32(fp.read())
 
-        return " ".join([exe_descriptor] + options)
+        crc32 = zlib.crc32(" ".join(options).encode("utf-8"), crc32)
+
+        return f"mpy_{crc32}"
 
     def _download_mpy_cross(
         self, implementation_name: str, version_prefix: str, target_path: str
@@ -151,3 +154,7 @@ class Compiler:
             basename += ".exe"
 
         return os.path.join(self._minny_cache_dir, "mpy-cross", basename)
+
+
+def get_module_format(compile: bool, compiler: Compiler) -> str:
+    return compiler.get_module_format() if compile else "py"
