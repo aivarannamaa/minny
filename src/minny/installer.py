@@ -224,7 +224,8 @@ class Installer(ABC):
 
             rel_meta_file_path = self._tmgr.join_path(rel_meta_dir, name)
             info = self.parse_meta_file_path(rel_meta_file_path)
-            result[info.name] = info
+            if info is not None:
+                result[info.name] = info
 
         return result
 
@@ -238,13 +239,16 @@ class Installer(ABC):
     @abstractmethod
     def get_package_latest_version(self, name: str) -> Optional[str]: ...
 
-    def parse_meta_file_path(self, meta_file_path: str) -> PackageInstallationInfo:
+    def parse_meta_file_path(self, meta_file_path: str) -> Optional[PackageInstallationInfo]:
         logger.debug(f"Parsing meta file path {meta_file_path}")
         _, meta_file_name = self._tmgr.split_dir_and_basename(meta_file_path)
         assert meta_file_name is not None
         assert meta_file_name.endswith(META_FILE_SUFFIX)
         parts = meta_file_name[: -len(META_FILE_SUFFIX)].split("-")
-        assert len(parts) == 2
+        if len(parts) != 2:
+            logger.warning(f"Unexpected metadata file name: {meta_file_name}")
+            return None
+
         return PackageInstallationInfo(
             rel_meta_file_path=meta_file_path,
             name=self.deslug_package_name(parts[0]),
