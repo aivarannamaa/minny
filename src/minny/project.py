@@ -157,7 +157,7 @@ class ProjectManager:
                 for canonical_name in packages_to_deploy:
                     source_info = synced_packages_infos[canonical_name]
                     source_meta = source_installer.load_package_metadata(source_info)
-                    target_installer.check_deploy_locally_installed_package(
+                    target_installer.smart_deploy_or_replace_locally_installed_package(
                         source_dir=self._lib_dir,
                         source_package_info=source_info,
                         source_package_meta=source_meta,

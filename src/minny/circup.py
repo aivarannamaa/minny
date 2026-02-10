@@ -293,7 +293,7 @@ class CircupInstaller(Installer):
     ) -> None:
         requirement = Requirement(spec)
         canonical_name = normalize_circup_name(requirement.name)
-        installed_info = self.get_package_installed_info(canonical_name)
+        installed_info = self.get_installed_package_info(canonical_name)
         if installed_info is not None and installed_info.version in requirement.specifier:
             print(
                 f"Compatible version of {requirement} is already installed ({installed_info.version})."

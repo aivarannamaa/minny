@@ -73,6 +73,9 @@ class Tracker:
         if path in self._tracked_files:
             del self._tracked_files[path]
 
+        # TODO: if looks like package metadata file, and the same version is tracked, then register_package_uninstall
+        # (required with deploy --delete)
+
     def smart_upload(
         self,
         source_abs_path: str,
@@ -167,27 +170,11 @@ class Tracker:
     def get_package_installation_info(
         self, installer_name: str, canonical_package_name: str
     ) -> Optional[TrackedPackageInfo]:
+        """Non-None result does not guarantee the package is still installed or intact"""
         if installer_name not in self._tracked_packages_by_installer:
             return None
 
         return self._tracked_packages_by_installer[installer_name].get(canonical_package_name, None)
-
-    def get_matching_installation(
-        self,
-        installer_name: str,
-        canonical_package_name: str,
-        version: str,
-        module_format: str,
-    ) -> Optional[TrackedPackageInfo]:
-        package_info = self.get_package_installation_info(installer_name, canonical_package_name)
-        if (
-            package_info is not None
-            and package_info["version"] == version
-            and package_info["module_format"] == module_format
-        ):
-            return package_info
-
-        return None
 
 
 class DummyTracker(Tracker):

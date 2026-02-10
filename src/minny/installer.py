@@ -237,7 +237,7 @@ class Installer(ABC):
     def get_installed_package_names(self) -> List[str]:
         return list(self.get_installed_package_infos().keys())
 
-    def get_package_installed_info(self, name: str) -> Optional[PackageInstallationInfo]:
+    def get_installed_package_info(self, name: str) -> Optional[PackageInstallationInfo]:
         canonical_name = self.canonicalize_package_name(name)
         return self.get_installed_package_infos().get(canonical_name)
 
@@ -317,7 +317,7 @@ class Installer(ABC):
 
         return result
 
-    def check_deploy_locally_installed_package(
+    def smart_deploy_or_replace_locally_installed_package(
         self,
         source_dir: str,
         source_package_info: PackageInstallationInfo,
@@ -330,19 +330,24 @@ class Installer(ABC):
 
         # Might there be another version of the same package installed? We need to know the installed files so that
         # we can delete obsolete files after deployment.
+        # An alternative would be uninstalling the old version first if the version changes, but:
+        # * this can be less efficient (unchanged modules get deleted in vain)
+        # * this would not help with editable packages, which may gain or lose files without changing the version
         previous_installation_files: List[str] = []
 
-        # Usually this method gets called when the correct package version is installed and tracked.
-        # This is the case we need to optimize, so we first try the tracker, not the filesystem.
+        # Usually this method gets called when a version of the package is already installed and tracked.
+        # This is the case we need to optimize, so we rely on the tracker, not the filesystem.
         previous_tracked_installation = self._tracker.get_package_installation_info(
             self.get_installer_name(), canonical_name
         )
         if previous_tracked_installation is not None:
-            logger.debug(f"{canonical_name} already installed (according to the tracker)")
+            logger.debug(
+                f"A version of {canonical_name} already installed (according to the tracker)"
+            )
             previous_installation_files = previous_tracked_installation["files"]
         else:
             # the package may still be installed, just not tracked
-            previous_real_installation = self.get_package_installed_info(canonical_name)
+            previous_real_installation = self.get_installed_package_info(canonical_name)
             if previous_real_installation is not None:
                 logger.debug(f"{canonical_name} already installed (according to the filesystem)")
                 previous_real_meta = self.load_package_metadata(previous_real_installation)
@@ -350,6 +355,9 @@ class Installer(ABC):
             else:
                 logger.debug("No version of the package installed yet")
 
+        # We proceed by smart-overwriting all existing files (if any), including metadata files
+        # (if same version is installed).
+        # This will be fast because of the tracking info (files not changed will not be actually overwritten).
         new_installation_files = self._deploy_locally_installed_package(
             source_package_info,
             source_package_meta,
@@ -361,7 +369,7 @@ class Installer(ABC):
 
         for file in previous_installation_files:
             if file not in new_installation_files:
-                print(f"Removing obsolete file {file}")
+                print(f"Removing package file left over from the previous installation: {file}")
                 self._tracker.remove_file_if_exists(file)
 
         return new_installation_files
