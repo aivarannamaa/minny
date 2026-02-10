@@ -16,11 +16,11 @@ from urllib.parse import urlsplit
 
 from minny import get_default_minny_cache_dir
 from minny.common import UserError
-from minny.compiling import Compiler, get_module_format
+from minny.compiling import Compiler
 from minny.installer import Installer, PackageMetadata
 from minny.settings import SettingsReader
 from minny.target import TargetManager
-from minny.tracking import TrackedPackageInfo, Tracker
+from minny.tracking import Tracker
 from minny.util import (
     download_bytes,
     get_latest_github_release_tag,
@@ -252,10 +252,9 @@ class CircupInstaller(Installer):
         if editable:
             meta = self.collect_editable_package_metadata_from_project_dir(source_dir)
             self.tweak_editable_project_path(meta, spec)
-            rel_meta_path = self.get_relative_metadata_path(meta["name"], meta["version"], "py")
+            rel_meta_path = self.get_relative_metadata_path(meta["name"], meta["version"])
             meta["files"].append(rel_meta_path)
-            module_format = get_module_format(compile, compiler)
-            self.save_package_metadata(rel_meta_path, meta, module_format)
+            self.save_package_metadata(rel_meta_path, meta)
         else:
             temp_build_path = tempfile.mkdtemp()
 
@@ -378,15 +377,14 @@ class CircupInstaller(Installer):
         deps = self._find_package_deps_from_source(build_path, canonical_name)
         meta["dependencies"] = deps
 
-        module_format = get_module_format(compile, compiler)
-
-        meta_path = self.get_relative_metadata_path(canonical_name, version, module_format)
+        meta_path = self.get_relative_metadata_path(canonical_name, version)
         meta["files"].append(meta_path)
-        self.save_package_metadata(meta_path, meta, module_format)
+        self.save_package_metadata(meta_path, meta)
         self._tracker.register_package_install(
             self.get_installer_name(),
             canonical_name,
-            TrackedPackageInfo(version=version, module_format=module_format, files=meta["files"]),
+            version=version,
+            files=meta["files"],
         )
 
         if not no_deps:

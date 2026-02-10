@@ -13,29 +13,28 @@ from minny.util import parse_json_file
 logger = getLogger(__name__)
 
 
-class TrackedFileInfo(TypedDict):
+class _TrackedFileInfo(TypedDict):
     crc32: int
     source_path: NotRequired[str]  # allows faster up-to-date checking for file transfers
     source_mtimte: NotRequired[float]
     module_format: NotRequired[str]
 
 
-class TrackedPackageInfo(TypedDict):
+class _TrackedPackageInfo(TypedDict):
     version: str
-    module_format: str
     files: List[str]
 
 
-SingleInstallerTrackedPackages = Dict[str, TrackedPackageInfo]  # key is package name
+_SingleInstallerTrackedPackages = Dict[str, _TrackedPackageInfo]  # key is package name
 
 
 class Tracker:
     def __init__(self, tmgr: TargetManager, minny_cache_dir: Optional[str] = None):
         self._tmgr = tmgr
         self._minny_cache_dir: str = minny_cache_dir or get_default_minny_cache_dir()
-        self._tracked_files: Dict[str, TrackedFileInfo] = {}  # key is abs target path
+        self._tracked_files: Dict[str, _TrackedFileInfo] = {}  # key is abs target path
         self._tracked_packages_by_installer: Dict[
-            str, SingleInstallerTrackedPackages
+            str, _SingleInstallerTrackedPackages
         ] = {}  # key is installer name
 
     def _load_known_state(self) -> None:
@@ -145,16 +144,18 @@ class Tracker:
             )
             self._tmgr.ensure_dir_and_write_file(target_path, content)
 
-        self._tracked_files[target_path] = TrackedFileInfo(crc32=source_crc32)
+        self._tracked_files[target_path] = _TrackedFileInfo(crc32=source_crc32)
         self._save_tracking_info()
 
     def register_package_install(
-        self, installer_name: str, canonical_package_name: str, package_info: TrackedPackageInfo
+        self, installer_name: str, canonical_package_name: str, version: str, files: List[str]
     ) -> None:
         if installer_name not in self._tracked_packages_by_installer:
             self._tracked_packages_by_installer[installer_name] = {}
 
-        self._tracked_packages_by_installer[installer_name][canonical_package_name] = package_info
+        self._tracked_packages_by_installer[installer_name][canonical_package_name] = (
+            _TrackedPackageInfo(version=version, files=files)
+        )
         self._save_tracking_info()
 
     def register_package_uninstall(self, installer_name: str, canonical_package_name: str) -> None:
@@ -169,7 +170,7 @@ class Tracker:
 
     def get_package_installation_info(
         self, installer_name: str, canonical_package_name: str
-    ) -> Optional[TrackedPackageInfo]:
+    ) -> Optional[_TrackedPackageInfo]:
         """Non-None result does not guarantee the package is still installed or intact"""
         if installer_name not in self._tracked_packages_by_installer:
             return None

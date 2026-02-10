@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 
-set -e
+# use with --snapshot-update to update snapshots
+
+set -euo pipefail
 
 uv run pytest \
     --log-cli-level=WARNING \
@@ -9,4 +11,5 @@ uv run pytest \
     --snapshot-diff-mode=detailed \
     -o log_cli=true \
     -o truncation_limit_lines=0 \
-    -o truncation_limit_chars=0
+    -o truncation_limit_chars=0  \
+    "$@"

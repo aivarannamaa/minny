@@ -154,7 +154,3 @@ class Compiler:
             basename += ".exe"
 
         return os.path.join(self._minny_cache_dir, "mpy-cross", basename)
-
-
-def get_module_format(compile: bool, compiler: Compiler) -> str:
-    return compiler.get_module_format() if compile else "py"

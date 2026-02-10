@@ -11,11 +11,10 @@ from logging import getLogger
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from minny.compiling import Compiler, get_module_format
+from minny.compiling import Compiler
 from minny.dir_target import DirTargetManager
 from minny.installer import META_ENCODING, EditableInfo, Installer, PackageMetadata
 from minny.pyproject_analyzer import collect_editable_package_metadata_from_pip_compatible_project
-from minny.tracking import TrackedPackageInfo
 from minny.util import (
     get_venv_site_packages_path,
     normalize_name,
@@ -240,15 +239,15 @@ class PipInstaller(Installer):
                 )
                 meta["files"].append(final_rel_path)
 
-        module_format = get_module_format(compile, compiler)
-        rel_meta_path = self.get_relative_metadata_path(canonical_name, version, module_format)
+        rel_meta_path = self.get_relative_metadata_path(canonical_name, version)
         meta["files"].append(rel_meta_path)
 
-        self.save_package_metadata(rel_meta_path, meta, module_format)
+        self.save_package_metadata(rel_meta_path, meta)
         self._tracker.register_package_install(
             self.get_installer_name(),
             canonical_name,
-            TrackedPackageInfo(version=version, module_format=module_format, files=meta["files"]),
+            version=version,
+            files=meta["files"],
         )
 
     def _populate_venv(self) -> str:

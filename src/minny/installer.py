@@ -8,10 +8,10 @@ from typing import Dict, List, NotRequired, Optional, TypedDict
 
 from minny import get_default_minny_cache_dir
 from minny.common import UserError
-from minny.compiling import Compiler, get_module_format
+from minny.compiling import Compiler
 from minny.dir_target import DirTargetManager
 from minny.target import TargetManager
-from minny.tracking import TrackedPackageInfo, Tracker
+from minny.tracking import Tracker
 from minny.util import parse_editable_spec, read_requirements_from_txt_file
 from packaging.requirements import Requirement
 from packaging.version import InvalidVersion, Version
@@ -46,7 +46,6 @@ class PackageInstallationInfo:
     rel_meta_file_path: str
     name: str
     version: str
-    module_format: str
 
     def __post_init__(self):
         if self.rel_meta_file_path.startswith("/") or ":" in self.rel_meta_file_path:
@@ -199,21 +198,16 @@ class Installer(ABC):
             ).replace("\\", "/")
             meta["editable"]["project_path"] = from_spec_rel_project_path
 
-    def save_package_metadata(
-        self, rel_meta_path: str, meta: PackageMetadata, module_format: str
-    ) -> None:
+    def save_package_metadata(self, rel_meta_path: str, meta: PackageMetadata) -> None:
         full_path = self._tmgr.join_path(
             self.get_target_dir(),
             rel_meta_path,
         )
-        content = self.compile_package_metadata(meta, module_format)
+        content = self.compile_package_metadata(meta)
         self._tracker.smart_write_to_tracked_file(full_path, content)
 
-    def compile_package_metadata(self, meta: PackageMetadata, module_format: str) -> bytes:
-        # Record some extra information so that we can determine installation's compatibility later
-        data = dict(meta)
-        data["module_format"] = module_format
-        return json.dumps(data, sort_keys=True).encode(META_ENCODING)
+    def compile_package_metadata(self, meta: PackageMetadata) -> bytes:
+        return json.dumps(meta, sort_keys=True).encode(META_ENCODING)
 
     def get_installed_package_infos(self) -> Dict[str, PackageInstallationInfo]:
         rel_meta_dir = f".{self.get_installer_name()}"
@@ -250,12 +244,11 @@ class Installer(ABC):
         assert meta_file_name is not None
         assert meta_file_name.endswith(META_FILE_SUFFIX)
         parts = meta_file_name[: -len(META_FILE_SUFFIX)].split("-")
-        assert len(parts) == 3
+        assert len(parts) == 2
         return PackageInstallationInfo(
             rel_meta_file_path=meta_file_path,
             name=self.deslug_package_name(parts[0]),
             version=self.deslug_package_version(parts[1]),
-            module_format=parts[2],
         )
 
     def load_package_metadata(self, info: PackageInstallationInfo) -> PackageMetadata:
@@ -264,8 +257,10 @@ class Installer(ABC):
         )
         return json.loads(raw)
 
-    def get_relative_metadata_path(self, name: str, version: str, module_format: str) -> str:
-        file_name = f"{self.slug_package_name(name)}-{self.slug_package_version(version)}-{module_format}{META_FILE_SUFFIX}"
+    def get_relative_metadata_path(self, name: str, version: str) -> str:
+        file_name = (
+            f"{self.slug_package_name(name)}-{self.slug_package_version(version)}{META_FILE_SUFFIX}"
+        )
         return self._tmgr.join_path(f".{self.get_installer_name()}", file_name)
 
     @abstractmethod
@@ -416,21 +411,17 @@ class Installer(ABC):
             )
             target_metadata["files"].append(final_target_rel_path)
 
-        target_module_format = get_module_format(compile, compiler)
         target_rel_meta_path = self.get_relative_metadata_path(
-            source_package_info.name, source_package_info.version, target_module_format
+            source_package_info.name, source_package_info.version
         )
         target_metadata["files"].append(target_rel_meta_path)
-        self.save_package_metadata(target_rel_meta_path, target_metadata, target_module_format)
+        self.save_package_metadata(target_rel_meta_path, target_metadata)
 
         self._tracker.register_package_install(
             self.get_installer_name(),
             canonical_name,
-            TrackedPackageInfo(
-                version=target_metadata["version"],
-                module_format=target_module_format,
-                files=target_metadata["files"],
-            ),
+            version=target_metadata["version"],
+            files=target_metadata["files"],
         )
 
         return target_metadata["files"]
