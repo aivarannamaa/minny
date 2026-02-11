@@ -6,7 +6,6 @@ import sys
 import tomllib
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
 from logging import getLogger
 from pathlib import Path
 from typing import Any, List, Optional, Sequence, Tuple
@@ -15,46 +14,6 @@ import packaging.version
 from packaging.utils import canonicalize_name
 
 logger = getLogger(__name__)
-
-
-@dataclass
-class ParsedWheelFilename:
-    project: str
-    version: str
-    build: Optional[str]
-    python_tags: list[str]
-    abi_tags: list[str]
-    platform_tags: list[str]
-
-
-def parse_wheel_filename(filename: str) -> ParsedWheelFilename:
-    # Adapted from https://github.com/jwodder/wheel-filename/blob/1568eb2f1726425588550067f09f5c0fde6c9652/src/wheel_filename/__init__.py
-    PYTHON_TAG_RGX = r"[\w\d]+"
-    ABI_TAG_RGX = r"[\w\d]+"
-    PLATFORM_TAG_RGX = r"[\w\d]+"
-
-    WHEEL_FILENAME_CRGX = re.compile(
-        r"(?P<project>[A-Za-z0-9](?:[A-Za-z0-9._]*[A-Za-z0-9])?)"
-        r"-(?P<version>[A-Za-z0-9_.!+]+)"
-        r"(?:-(?P<build>[0-9][\w\d.]*))?"
-        r"-(?P<python_tags>{0}(?:\.{0})*)"
-        r"-(?P<abi_tags>{1}(?:\.{1})*)"
-        r"-(?P<platform_tags>{2}(?:\.{2})*)"
-        r"\.[Ww][Hh][Ll]".format(PYTHON_TAG_RGX, ABI_TAG_RGX, PLATFORM_TAG_RGX)
-    )
-    basename = os.path.basename(os.fsdecode(filename))
-    m = WHEEL_FILENAME_CRGX.fullmatch(basename)
-    if not m:
-        raise ValueError(f"Unexpected wheel filename {basename}")
-
-    return ParsedWheelFilename(
-        project=m.group("project"),
-        version=m.group("version"),
-        build=m.group("build"),
-        python_tags=m.group("python_tags").split("."),
-        abi_tags=m.group("abi_tags").split("."),
-        platform_tags=m.group("platform_tags").split("."),
-    )
 
 
 def create_dist_info_version_name(dist_name: str, version: str) -> str:
@@ -141,34 +100,6 @@ def parse_dist_info_dir_name(name: str) -> Tuple[str, str]:
     assert name.endswith(".dist-info")
     name, version = name[: -len(".dist-info")].split("-")
     return canonicalize_name(name), version
-
-
-def parse_dist_file_name(file_name: str) -> Tuple[str, str, str]:
-    file_name = file_name.lower()
-
-    if file_name.endswith(".whl"):
-        pwf = parse_wheel_filename(file_name)
-        return pwf.project, pwf.version, ".whl"
-
-    for suffix in [".zip", ".tar.gz"]:
-        if file_name.endswith(suffix):
-            file_name = file_name[: -len(suffix)]
-            break
-    else:
-        raise AssertionError("Unexpected file name " + file_name)
-
-    # dist name and version is separated by the dash, but both parts can also contain dashes...
-    if file_name.count("-") == 1:
-        dist_name, version = file_name.split("-")
-    else:
-        # assuming dashes in the version part have digit on their left and letter on their right
-        # let's get rid of these
-        tweaked_file_name = re.sub(r"(\d)-([a-zA-Z])", r"\1_\2", file_name)
-        # now let's treat the rightmost dash as separator
-        dist_name = tweaked_file_name.rsplit("-", maxsplit=1)[0]
-        version = file_name[len(dist_name) + 1 :]
-
-    return dist_name, version, suffix
 
 
 def starts_with_continuation_byte(data: bytes) -> bool:
