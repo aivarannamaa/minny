@@ -37,8 +37,8 @@ class Tracker:
             str, _SingleInstallerTrackedPackages
         ] = {}  # key is installer name
 
-    def _load_known_state(self) -> None:
-        path = self._get_device_state_path()
+    def _load_tracking_info(self) -> None:
+        path = self._get_tracking_info_path()
         if not os.path.isfile(path):
             logger.debug(f"Device state cache '{path}' does not exist yet")
             return
@@ -50,7 +50,7 @@ class Tracker:
         self._tracked_packages_by_installer = data["tracked_packages"]
 
     def _save_tracking_info(self) -> None:
-        path = self._get_device_state_path()
+        path = self._get_tracking_info_path()
         os.makedirs(os.path.dirname(path), exist_ok=True)
         logger.debug(f"Saving device state to '{path}'")
         with open(path, mode="wt", encoding="utf-8") as fp:
@@ -62,7 +62,7 @@ class Tracker:
                 fp,
             )
 
-    def _get_device_state_path(self) -> str:
+    def _get_tracking_info_path(self) -> str:
         device_id = self._tmgr.get_device_id()
         safe_device_id = re.sub(r"[:/\\]+", "_", device_id)
         return os.path.join(self._minny_cache_dir, "devices", safe_device_id + ".json")
@@ -185,5 +185,5 @@ class DummyTracker(Tracker):
     def _save_tracking_info(self) -> None:
         pass
 
-    def _load_known_state(self) -> None:
+    def _load_tracking_info(self) -> None:
         pass

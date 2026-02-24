@@ -17,7 +17,12 @@ from urllib.parse import urlsplit
 from minny import get_default_minny_cache_dir
 from minny.common import UserError
 from minny.compiling import Compiler
-from minny.installer import Installer, PackageMetadata
+from minny.installer import (
+    ExtendedSpec,
+    Installer,
+    PackageMetadata,
+    parse_pip_compatible_plain_spec,
+)
 from minny.settings import SettingsReader
 from minny.target import TargetManager
 from minny.tracking import Tracker
@@ -27,7 +32,6 @@ from minny.util import (
     is_safe_version,
     normalize_name,
     parse_dist_info_dir_name,
-    parse_editable_spec,
     parse_toml_file,
     read_requirements_from_txt_file,
 )
@@ -121,8 +125,7 @@ class CircupInstaller(Installer):
 
     def install(
         self,
-        specs: Optional[List[str]] = None,
-        editables: Optional[List[str]] = None,
+        extended_specs: List[str],
         no_deps: bool = False,
         compile: bool = True,
         mpy_cross: Optional[str] = None,
@@ -130,39 +133,21 @@ class CircupInstaller(Installer):
         requirement_files: Optional[List[str]] = None,
         **kwargs,
     ) -> None:
-        self.validate_editables(editables)
         compiler = Compiler(self._tmgr, mpy_cross, self._minny_cache_dir)
-        specs = specs or []
         requirement_files = requirement_files or []
-        editables = editables or []
+        all_extended_specs = extended_specs + self._load_requirements(requirement_files)
 
-        all_specs = specs + self._load_requirements(requirement_files)
+        self.validate_specs(all_extended_specs)
 
         installation_attempts = []
 
-        # Install regular packages
-        for spec in all_specs:
+        for espec_str in all_extended_specs:
             self._install_package(
-                spec,
+                self.parse_extended_spec(espec_str),
                 pre=pre,
                 no_deps=no_deps,
                 target_dir=self._target_dir,
                 installation_attempts=installation_attempts,
-                editable=False,
-                compile=compile,
-                compiler=compiler,
-            )
-
-        # Install editable packages (local source directories)
-        for editable_spec in editables:
-            self._install_local_package(
-                spec=editable_spec,
-                pre=pre,
-                no_deps=no_deps,
-                target_dir=self._target_dir,
-                installation_attempts=installation_attempts,
-                editable=True,
-                expected_package_name=None,
                 compile=compile,
                 compiler=compiler,
             )
@@ -176,36 +161,34 @@ class CircupInstaller(Installer):
 
     def _install_package(
         self,
-        spec: str,
+        espec: ExtendedSpec,
         pre: bool,
         no_deps: bool,
         target_dir: str,
-        installation_attempts: List[str],
-        editable: bool,
+        installation_attempts: List[ExtendedSpec],
         compile: bool,
         compiler: Compiler,
     ) -> None:
-        if spec in installation_attempts:
-            logger.warning(f"Skipping another install of '{spec}' to avoid infinite recursion.")
+        if espec in installation_attempts:
+            logger.debug(f"Skipping another install of '{espec}' to avoid infinite recursion.")
             return
 
-        installation_attempts.append(spec)
+        installation_attempts.append(espec)
 
-        if "/" in spec or "\\" in spec or spec == ".":
+        if espec.is_local_dir_spec():
             self._install_local_package(
-                spec=spec,
+                espec=espec,
                 pre=pre,
                 no_deps=no_deps,
                 target_dir=target_dir,
                 installation_attempts=installation_attempts,
                 expected_package_name=None,
-                editable=editable,
                 compile=compile,
                 compiler=compiler,
             )
         else:
             self._install_bundle_package(
-                spec=spec,
+                espec=espec,
                 pre=pre,
                 no_deps=no_deps,
                 target_dir=target_dir,
@@ -216,17 +199,18 @@ class CircupInstaller(Installer):
 
     def _install_local_package(
         self,
-        spec: str,
+        espec: ExtendedSpec,
         pre: bool,
         no_deps: bool,
         target_dir: str,
-        installation_attempts: List[str],
-        editable: bool,
+        installation_attempts: List[ExtendedSpec],
         expected_package_name: Optional[str],
         compile: bool,
         compiler: Compiler,
     ) -> None:
-        parsed_package_name, source_dir = parse_editable_spec(spec)
+        parsed_package_name = espec.name
+        source_dir = espec.location
+        assert source_dir is not None
 
         assert (
             parsed_package_name is None
@@ -249,48 +233,42 @@ class CircupInstaller(Installer):
                 f"Can't build {source_dir} as it doesn't have project.name in pyproject.toml"
             )
 
-        if editable:
-            meta = self.collect_editable_package_metadata_from_project_dir(source_dir)
-            self.tweak_editable_project_path(meta, spec)
-            rel_meta_path = self.get_relative_metadata_path(meta["name"], meta["version"])
-            meta["files"].append(rel_meta_path)
-            self.save_package_metadata(rel_meta_path, meta)
-        else:
-            temp_build_path = tempfile.mkdtemp()
+        temp_build_path = tempfile.mkdtemp()
 
-            package_name, version = CircupBuilder().build_local_package(
-                package_name=expected_package_name,
-                version=None,
-                source_dir=source_dir,
-                target_dir=temp_build_path,
-                is_temp_source_dir=False,
-            )
+        package_name, version = CircupBuilder().build_local_package(
+            package_name=expected_package_name,
+            version=None,
+            source_dir=source_dir,
+            target_dir=temp_build_path,
+            is_temp_source_dir=False,
+        )
 
-            self._install_built_package(
-                temp_build_path,
-                package_name,
-                version,
-                pre,
-                no_deps,
-                target_dir,
-                installation_attempts,
-                compile,
-                compiler,
-            )
+        self._install_built_package(
+            espec,
+            temp_build_path,
+            package_name,
+            version,
+            pre,
+            no_deps,
+            target_dir,
+            installation_attempts,
+            compile,
+            compiler,
+        )
 
-            shutil.rmtree(temp_build_path)
+        shutil.rmtree(temp_build_path)
 
     def _install_bundle_package(
         self,
-        spec: str,
+        espec: ExtendedSpec,
         pre: bool,
         no_deps: bool,
         target_dir: str,
-        installation_attempts: List[str],
+        installation_attempts: List[ExtendedSpec],
         compile: bool,
         compiler: Compiler,
     ) -> None:
-        requirement = Requirement(spec)
+        requirement = Requirement(espec.plain_spec)
         canonical_name = normalize_circup_name(requirement.name)
         installed_info = self.get_installed_package_info(canonical_name)
         if installed_info is not None and installed_info.version in requirement.specifier:
@@ -335,6 +313,7 @@ class CircupInstaller(Installer):
             logger.info("Version is already in cache")
 
         self._install_built_package(
+            espec,
             build_path,
             canonical_name,
             version,
@@ -348,18 +327,22 @@ class CircupInstaller(Installer):
 
     def _install_built_package(
         self,
+        espec: ExtendedSpec,
         build_path: str,
         canonical_name: str,
         version: str,
         pre: bool,
         no_deps: bool,
         target_dir: str,
-        installation_attempts: List[str],
+        installation_attempts: List[ExtendedSpec],
         compile: bool,
         compiler: Compiler,
     ):
         # TODO: add actual name instead of canonical, license, summary, urls
         meta = PackageMetadata(name=canonical_name, version=version, files=[])
+        if espec.location is not None:
+            meta["project_path"] = espec.location
+
         src_lib_dir = os.path.join(build_path, "lib")
         assert os.path.isdir(src_lib_dir)
 
@@ -379,6 +362,7 @@ class CircupInstaller(Installer):
 
         meta_path = self.get_relative_metadata_path(canonical_name, version)
         meta["files"].append(meta_path)
+
         self.save_package_metadata(meta_path, meta)
         self._tracker.register_package_install(
             self.get_installer_name(),
@@ -390,15 +374,18 @@ class CircupInstaller(Installer):
         if not no_deps:
             for req in deps:
                 self._install_package(
-                    req,
+                    self.parse_extended_spec(req),
                     pre=pre,
                     no_deps=False,
                     target_dir=target_dir,
                     installation_attempts=installation_attempts,
-                    editable=False,
                     compile=compile,
                     compiler=compiler,
                 )
+
+        if espec.editable:
+            assert espec.location is not None
+            self._make_installed_package_editable(meta_path, meta, espec.location)
 
     def _find_package_deps_from_source(self, build_path, canonical_name) -> List[str]:
         all_reqs = []
@@ -481,17 +468,11 @@ class CircupInstaller(Installer):
     def deslug_package_version(self, version: str) -> str:
         return version.replace("_", "-")
 
-    def collect_editable_package_metadata_from_project_dir(
-        self, project_path: str
-    ) -> PackageMetadata:
-        from minny.pyproject_analyzer import (
-            collect_editable_package_metadata_from_pip_compatible_project,
-        )
-
-        return collect_editable_package_metadata_from_pip_compatible_project(project_path)
-
     def get_normalized_no_deploy_packages(self) -> List[str]:
         return ["circuitpython_typing"]
+
+    def _parse_plain_spec(self, plain_spec: str) -> ExtendedSpec:
+        return parse_pip_compatible_plain_spec(plain_spec)
 
 
 class CircupBuilder:

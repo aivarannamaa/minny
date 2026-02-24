@@ -1,57 +1,49 @@
 import os.path
 import urllib.parse
-from typing import List, Optional
+from logging import getLogger
+from typing import Dict, List, Optional
 
 from minny.common import UserError
-from minny.installer import EditableInfo, Installer, PackageMetadata
+from minny.installer import ExtendedSpec, Installer, looks_like_local_dir
 from minny.util import parse_json_file
+
+logger = getLogger(__name__)
 
 
 class MipInstaller(Installer):
-    def collect_editable_package_metadata_from_project_dir(
-        self, project_path: str
-    ) -> PackageMetadata:
-        project_path = os.path.abspath(project_path)
+    def compute_project_fingerprint(self, project_path: str) -> str:
+        package_json_path = os.path.join(project_path, "package.json")
+        if os.path.isfile(package_json_path):
+            return str(os.path.getmtime(package_json_path))
+        else:
+            return "0"
+
+    def compute_files_mapping(self, project_path: str, target_files: List[str]) -> Dict[str, str]:
+        assert os.path.isabs(project_path)
         package_json_path = os.path.join(project_path, "package.json")
         if not os.path.isfile(package_json_path):
             raise UserError(f"package.json not found in {project_path}")
         data = parse_json_file(package_json_path)
 
-        # TODO: try to extract name from spec
-        # TODO: do we have to have version?
-        meta = PackageMetadata(name=project_path, version=data.get("version", "0.0.1"), files=[])
+        result = {}
 
-        editable_files = {}
-        module_roots = []
         for url_dest, url_source in data.get("urls", []):
             assert isinstance(url_dest, str)
             assert isinstance(url_source, str)
-            editable_files["url_dest"] = url_source
-            if (url_dest.endswith(".py") or url_dest.endswith(".mpy")) and url_source.endswith(
-                url_dest
-            ):  # TODO: windows paths
-                module_root = url_source[: -len(url_dest)].rstrip("/")  # TODO win path
-                if module_root not in module_roots:
-                    module_roots.append(module_root)
-
-        meta["editable"] = EditableInfo(
-            project_path=project_path, files=editable_files, module_roots=module_roots
-        )
-
-        dependencies = []
-        for (
-            dep_name,
-            dep_version,
-        ) in data.get("deps", []):
-            if dep_version == "latest":
-                dependencies.append(dep_name)
+            if (
+                url_dest.startswith("..")
+                or url_dest.startswith("/")
+                or url_source.startswith("..")
+                or url_source.startswith("/")
+                or ":" in url_source
+            ):
+                logger.warning(f"Not registering {(url_dest, url_source)} as editable")
+            elif url_dest not in target_files:
+                logger.warning(f"{url_dest} present in package.json but not required")
             else:
-                dependencies.append(f"{dep_name}=={dep_version}")
+                result[url_dest] = url_source
 
-        if dependencies:
-            meta["dependencies"] = dependencies
-
-        return meta
+        return result
 
     def canonicalize_package_name(self, name: str) -> str:
         return name
@@ -74,8 +66,7 @@ class MipInstaller(Installer):
 
     def install(
         self,
-        specs: Optional[List[str]] = None,
-        editables: Optional[List[str]] = None,
+        extended_specs: Optional[List[str]] = None,
         no_deps: bool = False,
         compile: bool = True,
         mpy_cross: Optional[str] = None,
@@ -88,3 +79,23 @@ class MipInstaller(Installer):
     def get_package_latest_version(self, name: str) -> Optional[str]:
         # TODO:
         return None
+
+    def _parse_plain_spec(self, plain_spec: str) -> ExtendedSpec:
+        if "@" in plain_spec:
+            assert plain_spec.count("@") == 1
+            name, _version = plain_spec.split("@")
+            location = None
+        elif looks_like_local_dir(plain_spec):
+            name = None
+            location = plain_spec
+        else:
+            name = plain_spec
+            location = None
+
+        return ExtendedSpec(
+            extended_spec=plain_spec,
+            plain_spec=plain_spec,
+            name=name,
+            location=location,
+            editable=False,
+        )

@@ -1,22 +1,35 @@
 import fnmatch
+import hashlib
+import json
 import os.path
 from logging import getLogger
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, TypedDict
 
 from minny import get_default_minny_cache_dir
 from minny.circup import CircupInstaller
 from minny.common import UserError
 from minny.compiling import Compiler
 from minny.dir_target import DirTargetManager
-from minny.installer import Installer
+from minny.installer import Installer, PackageMetadata
 from minny.mip import MipInstaller
 from minny.pip import PipInstaller
 from minny.settings import load_minny_settings_from_pyproject_toml
 from minny.target import TargetManager
 from minny.tracking import DummyTracker, Tracker
-from minny.util import parse_json_file, parse_toml_file
+from minny.util import parse_json_file, parse_toml_file, resolve_with_anchor
 
 logger = getLogger(__name__)
+
+
+class _InstallerSyncState(TypedDict):
+    specs: List[str]
+    metas: Dict[str, PackageMetadata]
+
+
+class _CachedProjectInfo(TypedDict):
+    project_path: str
+    lib_dir: str
+    last_sync_states: Dict[str, _InstallerSyncState]
 
 
 class ProjectManager:
@@ -72,44 +85,141 @@ class ProjectManager:
     def _sync_dependencies(self):
         os.makedirs(self._lib_dir, exist_ok=True)
 
-        current_package_installer = self._get_current_package_installer_type()
+        current_package_installer_name = self._get_current_package_installer_type()
 
+        last_sync_states = self._load_last_sync_states()
+        new_sync_states: Dict[str, _InstallerSyncState] = {}
         all_relevant_files = []
-        for installer_type in ["pip", "mip", "circup"]:
-            installer = self._create_installer(
-                installer_type, self._lib_dir_mgr, self._dummy_tracker
+
+        for installer_name in ["pip", "mip", "circup"]:
+            # Build specs: minny deps from tool.minny.dependencies.{installer_name}
+            if installer_name == "pip":
+                extended_spec_strings = self._minny_settings.dependencies.pip.copy()
+            elif installer_name == "mip":
+                extended_spec_strings = self._minny_settings.dependencies.mip.copy()
+            else:
+                assert installer_name == "circup"
+                extended_spec_strings = self._minny_settings.dependencies.circup.copy()
+
+            if current_package_installer_name == installer_name:
+                # add current package as implicit dependency
+                extended_spec_strings.insert(0, "-e .")
+
+            installer_new_sync_state = self._sync_installer_dependencies(
+                installer_name, extended_spec_strings, last_sync_states.get(installer_name)
+            )
+            for meta in installer_new_sync_state["metas"].values():
+                all_relevant_files += meta["files"]
+            new_sync_states[installer_name] = installer_new_sync_state
+
+        self._clean_up_local_lib(all_relevant_files)
+
+        if new_sync_states != last_sync_states:
+            self._save_last_sync_states(new_sync_states)
+
+    def _sync_installer_dependencies(
+        self,
+        installer_name: str,
+        espec_strings: List[str],
+        last_sync_state: Optional[_InstallerSyncState],
+    ) -> _InstallerSyncState:
+        installer = self._create_installer(installer_name, self._lib_dir_mgr, self._dummy_tracker)
+        especs = [installer.parse_extended_spec(s) for s in espec_strings]
+
+        if last_sync_state is not None:
+            self._remove_out_of_date_editables_from_lib(installer, last_sync_state)
+
+        intermediate_metas = installer.get_installed_package_metas()
+
+        if last_sync_state is None:
+            logger.debug(f"No last sync state for {installer_name}")
+        elif especs != last_sync_state["specs"]:
+            logger.info(f"Package specs for {installer_name} have been changed")
+        elif intermediate_metas != last_sync_state["metas"]:
+            logger.info(f"Metadata files for {installer_name} not up to date")
+        else:
+            # This is supposed to be the most common case
+            # TODO: also check that all listed files are still present
+            logger.debug("The lib folder is already in sync")
+            assert last_sync_state is not None
+            return last_sync_state
+
+        if not especs:
+            logger.debug(f"No specs for {installer_name}")
+        else:
+            logger.debug(f"Need to invoke {installer_name}")
+            installer.install_for_project(
+                extended_specs=espec_strings, project_path=self._project_dir
             )
 
-            # Build specs: minny deps from tool.minny.dependencies.{installer_type}
-            if installer_type == "pip":
-                raw_specs = self._minny_settings.dependencies.pip.copy()
-            elif installer_type == "mip":
-                raw_specs = self._minny_settings.dependencies.mip.copy()
-            else:
-                assert installer_type == "circup"
-                raw_specs = self._minny_settings.dependencies.circup.copy()
+        # Some installed packages may not be required anymore
+        intermediate_metas = installer.get_installed_package_metas()
+        logger.debug(
+            f"New set of {installer_name} packages after install: {', '.join(intermediate_metas.keys())}"
+        )
+        required_metas = self.filter_required_packages(intermediate_metas, espec_strings, installer)
+        logger.debug(
+            f"New set of required {installer_name} packages: {', '.join(intermediate_metas.keys())}"
+        )
+        return _InstallerSyncState(specs=espec_strings, metas=required_metas)
 
-            if current_package_installer == installer_type:
-                # add current package as implicit dependency
-                raw_specs.insert(0, "-e .")
+    def _remove_out_of_date_editables_from_lib(
+        self, installer: Installer, last_sync_state: _InstallerSyncState
+    ):
+        # TODO: removing is simple way to force reinstallation
+        pass
 
-            if raw_specs:
-                specs, editables = _parse_dependency_specs(raw_specs)
+    def filter_required_packages(
+        self,
+        metas: Dict[str, PackageMetadata],
+        espec_strings: List[str],
+        installer: Installer,
+    ) -> Dict[str, PackageMetadata]:
+        result = {}
 
-                installer.install_for_project(
-                    specs=specs, editables=editables, project_path=self._project_dir
-                )
+        def collect_required_metas(_especs: List[str]) -> None:
+            for espec_str in _especs:
+                espec = installer.parse_extended_spec(espec_str)
+                if espec.is_local_dir_spec():
+                    assert espec.location is not None
+                    meta = self._find_meta_by_project_path(
+                        resolve_with_anchor(espec.location, self._project_dir), metas
+                    )
+                    assert meta is not None
+                    name = installer.canonicalize_package_name(meta["name"])
+                else:
+                    assert espec.name is not None
+                    name = espec.name
 
-                installed_packages = installer.get_installed_package_infos()
-                logger.debug(f"Installed {installer_type} packages: {installed_packages}")
-                required_packages = installer.filter_required_packages(installed_packages, specs)
-                logger.debug(f"Required {installer_type} packages: {required_packages}")
+                canonical_name = installer.canonicalize_package_name(name)
+                if canonical_name in result:
+                    continue
 
-                for package in required_packages.values():
-                    meta = installer.load_package_metadata(package)
-                    for path in meta["files"]:
-                        all_relevant_files.append(os.path.join(installer.get_target_dir(), path))
+                meta = metas.get(canonical_name, None)
+                if meta is not None:
+                    result[canonical_name] = meta
 
+                    collect_required_metas(meta.get("dependencies", []))
+
+        collect_required_metas(espec_strings)
+
+        return result
+
+    def _find_meta_by_project_path(
+        self, abs_project_path: str, metas: Dict[str, PackageMetadata]
+    ) -> Optional[PackageMetadata]:
+        for meta in metas.values():
+            candidate_project_path = meta.get("project_path", None)
+            if candidate_project_path is None:
+                continue
+
+            abs_candidate_path = resolve_with_anchor(candidate_project_path, self._lib_dir)
+            if os.path.normcase(abs_candidate_path) == os.path.normcase(abs_project_path):
+                return meta
+
+        return None
+
+    def _clean_up_local_lib(self, all_relevant_files: List[str]) -> None:
         # Remove orphaned files not part of any package
         abs_norm_local_paths_to_keep = [
             os.path.normpath(
@@ -128,7 +238,7 @@ class ProjectManager:
             if not os.listdir(dirpath):
                 os.rmdir(dirpath)
 
-    def _deploy_packages(self, compiler: Compiler):
+    def _deploy_packages(self, compiler: Compiler) -> None:
         for deploy_spec in self._minny_settings.deploy.packages:
             destination = deploy_spec.destination
             if destination == "auto":
@@ -245,25 +355,49 @@ class ProjectManager:
             case _:
                 raise ValueError(f"Unknown installer type: {installer_type}")
 
+    def _load_last_sync_states(self) -> Dict[str, _InstallerSyncState]:
+        path = self._get_project_cache_path()
+        if os.path.exists(path):
+            assert os.path.isfile(path), f"{path} is not a file"
+            info: _CachedProjectInfo = parse_json_file(path)
+            if not os.path.samefile(info["project_path"], self._project_dir):
+                logger.warning("Cached project info has different project path")  # hash collision?
+                return {}
+            if info["lib_dir"] != self._lib_dir:
+                logger.info("Lib dir has changed since last sync")
+                return {}
 
-def _parse_dependency_specs(raw_specs: List[str]) -> Tuple[List[str], List[str]]:
-    """Parse dependency specs to separate regular specs from editable packages.
+            return info["last_sync_states"]
+        else:
+            logger.debug("Last sync info not found")
+            return {}
 
-    Handles requirements.txt-style syntax where editable packages are prefixed with '-e '.
+    def _save_last_sync_states(self, last_sync_states: Dict[str, _InstallerSyncState]) -> None:
+        path = self._get_project_cache_path()
+        logger.debug(f"Saving project info to '{path}'")
+        info = _CachedProjectInfo(
+            project_path=self._project_dir, lib_dir=self._lib_dir, last_sync_states=last_sync_states
+        )
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, mode="wt", encoding="utf-8") as fp:
+            json.dump(
+                info,
+                fp,
+            )
 
-    Args:
-        raw_specs: List of dependency specifications, potentially containing -e prefixed items
+    def _get_project_cache_path(self) -> str:
+        canonical_project_path = os.path.realpath(
+            os.path.normpath(os.path.normcase(self._project_dir))
+        )
+        project_hash = hashlib.sha256(canonical_project_path.encode("utf-8")).hexdigest()[:20]
+        return os.path.join(self._minny_cache_dir, "projects", project_hash + ".json")
 
-    Returns:
-        Tuple of (regular_specs, editable_specs)
 
-    Raises:
-        UserError: For invalid dependency specifications
-    """
-    regular_specs = []
+def _parse_dependency_specs(extended_specs: List[str]) -> Tuple[List[str], List[str]]:
+    plain_specs = []
     editable_specs = []
 
-    for spec in raw_specs:
+    for spec in extended_specs:
         trimmed_spec = spec.strip()
 
         # Empty specs are configuration errors
@@ -281,8 +415,7 @@ def _parse_dependency_specs(raw_specs: List[str]) -> Tuple[List[str], List[str]]
 
             package_path = parts[1]
             editable_specs.append(package_path)
-        else:
-            # Regular package specification
-            regular_specs.append(trimmed_spec)
 
-    return regular_specs, editable_specs
+        plain_specs.append(trimmed_spec)
+
+    return plain_specs, editable_specs

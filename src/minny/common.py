@@ -9,6 +9,10 @@ class UserError(RuntimeError):
     pass
 
 
+class ProjectError(RuntimeError):
+    pass
+
+
 class CommunicationError(RuntimeError):
     pass
 

@@ -1,4 +1,5 @@
 import os.path
+import shutil
 from pathlib import Path, PurePosixPath
 
 
@@ -14,5 +15,10 @@ def create_dir_snapshot(root: Path | str) -> dict[str, int]:
     return items
 
 
-def get_tests_cache_dir() -> str:
-    return os.path.join(os.path.dirname(__file__), ".cache")
+def prepare_tests_cache_dir() -> str:
+    cache_dir = os.path.join(os.path.dirname(__file__), ".cache")
+    for name in ["devices", "projects"]:
+        subdir_to_delete = os.path.join(cache_dir, name)
+        if os.path.exists(subdir_to_delete):
+            shutil.rmtree(subdir_to_delete)
+    return cache_dir

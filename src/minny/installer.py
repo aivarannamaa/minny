@@ -1,9 +1,13 @@
 import dataclasses
+import fnmatch
+import hashlib
 import json
 import os.path
 from abc import ABC, abstractmethod
 from copy import deepcopy
+from dataclasses import dataclass
 from logging import getLogger
+from pathlib import Path
 from typing import Dict, List, NotRequired, Optional, TypedDict
 
 from minny import get_default_minny_cache_dir
@@ -12,8 +16,7 @@ from minny.compiling import Compiler
 from minny.dir_target import DirTargetManager
 from minny.target import TargetManager
 from minny.tracking import Tracker
-from minny.util import parse_editable_spec, read_requirements_from_txt_file
-from packaging.requirements import Requirement
+from minny.util import read_requirements_from_txt_file
 from packaging.version import InvalidVersion, Version
 
 logger = getLogger(__name__)
@@ -22,12 +25,32 @@ META_ENCODING = "utf-8"
 META_FILE_SUFFIX = ".meta"
 
 
+@dataclass
+class ExtendedSpec:
+    """
+    Represents a requirement specifier, which also contains information about editability
+    (i.e. can represent "-e ../foo")
+    """
+
+    editable: bool
+    name: Optional[str]
+    location: Optional[str]
+    plain_spec: str
+    extended_spec: str
+
+    def __str__(self) -> str:
+        return self.extended_spec
+
+    def is_local_dir_spec(self) -> bool:
+        # TODO: handle file://
+        return self.location is not None and looks_like_local_dir(self.location)
+
+
 class EditableInfo(TypedDict):
-    project_path: str  # relative to lib dir
+    project_fingerprint: str
     files: Dict[
         str, str
     ]  # destination path relative to /lib => source path relative to project_path
-    module_roots: List[str]  # relative to lib dir
 
 
 class PackageMetadata(TypedDict):
@@ -38,6 +61,9 @@ class PackageMetadata(TypedDict):
     dependencies: NotRequired[List[str]]
     urls: NotRequired[Dict[str, str]]
     files: List[str]
+    project_path: NotRequired[
+        str
+    ]  # relative to lib dir or absolute if given as absolute in the spec
     editable: NotRequired[EditableInfo]
 
 
@@ -80,23 +106,20 @@ class Installer(ABC):
     @abstractmethod
     def get_installer_name(self) -> str: ...
 
-    def install_for_project(
-        self, specs: List[str], editables: List[str], project_path: str
-    ) -> None:
-        # Editable deps may be given with relative paths, and these are relative to project_path.
+    def install_for_project(self, extended_specs: List[str], project_path: str) -> None:
+        # Local deps may be given with relative paths, and these are relative to project_path.
         # Installer, on the other hand, uses cwd as anchor.
         old_wd = os.getcwd()
         os.chdir(project_path)
         try:
-            self.install(specs=specs, editables=editables, compile=False)
+            self.install(extended_specs=extended_specs, compile=False)
         finally:
             os.chdir(old_wd)
 
     @abstractmethod
     def install(
         self,
-        specs: Optional[List[str]] = None,
-        editables: Optional[List[str]] = None,
+        extended_specs: List[str],
         no_deps: bool = False,
         compile: bool = True,
         mpy_cross: Optional[str] = None,
@@ -118,12 +141,25 @@ class Installer(ABC):
                     all_specs.append(spec)
 
         for spec in all_specs:
-            package_name = self.extract_package_name_from_spec(spec)
-            self._uninstall_package(package_name)
+            if (
+                looks_like_local_dir(spec)
+                or "<" in spec
+                or ">" in spec
+                or "=" in spec
+                or "@" in spec
+            ):
+                raise UserError(
+                    f"{self.get_installer_name()} uninstall accepts only package names, not '{spec}'"
+                )
 
-    def validate_editables(self, editables: Optional[List[str]]) -> None:
-        if editables and not isinstance(self._tmgr, DirTargetManager):
-            raise UserError("Editable install is allowed only with dir tmgr")
+        for spec in all_specs:
+            self._uninstall_package(spec)
+
+    def validate_specs(self, extended_specs: List[str]) -> None:
+        for spec in extended_specs:
+            parsed_spec = self.parse_extended_spec(spec)
+            if parsed_spec.editable and not self.supports_editable_installs():
+                raise UserError("Editable install is allowed only with DirTargetManager")
 
     def _uninstall_package(self, name: str) -> None:
         canonical_name = self.canonicalize_package_name(name)
@@ -170,33 +206,28 @@ class Installer(ABC):
             else:
                 print(f"{info.name} {info.version}")
 
-    def tweak_editable_project_path(
-        self, meta: PackageMetadata, original_spec: Optional[str]
-    ) -> None:
-        if "editable" not in meta:
-            return
+    def reanchor_at_lib_dir(self, cwd_based_path: str) -> str:
+        if os.path.isabs(cwd_based_path):
+            return cwd_based_path
 
-        if original_spec is None:
-            return
+        # relative dirs given to installer are anchored to cwd,
+        # but in meta file they need to be stored relative to the lib dir
 
-        assert isinstance(self._tmgr, DirTargetManager)
-        _, original_project_path = parse_editable_spec(original_spec)
-        abs_lib_dir = os.path.join(self._tmgr.base_path, self.get_target_dir().lstrip("/"))
-        from_spec_abs_project_path = os.path.abspath(original_project_path)
-        from_meta_abs_project_path = meta["editable"]["project_path"]
-        assert os.path.normcase(os.path.normpath(from_spec_abs_project_path)) == os.path.normcase(
-            os.path.normpath(from_meta_abs_project_path)
+        if not isinstance(self._tmgr, DirTargetManager):
+            # cwd and target are on different filesystems
+            return os.path.abspath(cwd_based_path)
+
+        assert os.path.isabs(self._tmgr.base_path)
+        if self._tmgr.base_path[0].lower() != os.getcwd()[0].lower():
+            # can't express relative paths across different drives on Windows
+            return os.path.abspath(cwd_based_path)
+
+        # if possible, leave relative path relative
+        abs_local_lib_dir = os.path.normpath(
+            os.path.join(self._tmgr.base_path, self.get_target_dir().lstrip("/"))
         )
-
-        # record rel path if originally given as rel and on the same drive as target lib dir
-        if (
-            not os.path.isabs(original_project_path)
-            and from_spec_abs_project_path[0].lower() == abs_lib_dir[0]
-        ):
-            from_spec_rel_project_path = os.path.relpath(
-                from_spec_abs_project_path, abs_lib_dir
-            ).replace("\\", "/")
-            meta["editable"]["project_path"] = from_spec_rel_project_path
+        abs_project_path = os.path.abspath(cwd_based_path)
+        return os.path.relpath(abs_project_path, abs_local_lib_dir)
 
     def save_package_metadata(self, rel_meta_path: str, meta: PackageMetadata) -> None:
         full_path = self._tmgr.join_path(
@@ -227,6 +258,12 @@ class Installer(ABC):
             if info is not None:
                 result[info.name] = info
 
+        return result
+
+    def get_installed_package_metas(self) -> Dict[str, PackageMetadata]:
+        result = {}
+        for name, info in self.get_installed_package_infos().items():
+            result[name] = self.load_package_metadata(info)
         return result
 
     def get_installed_package_names(self) -> List[str]:
@@ -282,37 +319,167 @@ class Installer(ABC):
     @abstractmethod
     def deslug_package_version(self, version: str) -> str: ...
 
-    def extract_package_name_from_spec(self, spec: str) -> str:
-        return Requirement(spec).name
+    def parse_extended_spec(self, extended_spec: str) -> ExtendedSpec:
+        parts = extended_spec.split()
+        if len(parts) == 1:
+            editable = False
+            plain_spec = self._parse_plain_spec(extended_spec)
+        elif len(parts) == 2 and parts[0] == "-e":
+            editable = True
+            plain_spec = self._parse_plain_spec(parts[1])
+        else:
+            raise ValueError(f"Unsupported spec: {extended_spec!r}")
+
+        return ExtendedSpec(
+            editable=editable,
+            name=plain_spec.name,
+            location=plain_spec.location,
+            plain_spec=plain_spec.plain_spec,
+            extended_spec=extended_spec,
+        )
 
     @abstractmethod
-    def collect_editable_package_metadata_from_project_dir(
-        self, project_path: str
-    ) -> PackageMetadata: ...
+    def _parse_plain_spec(self, plain_spec: str) -> ExtendedSpec: ...
 
-    def filter_required_packages(
-        self, installed_packages: Dict[str, PackageInstallationInfo], specs: List[str]
-    ) -> Dict[str, PackageInstallationInfo]:
-        result = {}
+    def compute_project_fingerprint(self, project_path: str) -> str:
+        root = Path(project_path).resolve()
 
-        def collect_deps_names(reqs: List[str]) -> None:
-            for req in reqs:
-                canonical_name = self.canonicalize_package_name(
-                    self.extract_package_name_from_spec(req)
-                )
-                if canonical_name in result:
+        # Cruft to ignore *within included trees*
+        IGNORED_DIRS = {
+            "__pycache__",
+            ".pytest_cache",
+            ".mypy_cache",
+            ".ruff_cache",
+            ".tox",
+            ".nox",
+            ".venv",
+            "venv",
+            "env",
+            "build",
+            "dist",
+            ".eggs",
+            ".git",
+            ".hg",
+            ".svn",
+            ".idea",
+            ".vscode",
+        }
+        IGNORED_FILE_GLOBS = {
+            "*.pyc",
+            "*.pyo",
+            "*.pyd",
+            "*.so",
+            "*.dylib",
+            "*.dll",
+            ".DS_Store",
+        }
+        IGNORED_NAME_GLOBS = {"*.egg-info", "*.dist-info"}
+
+        MODULE_LIKE_SUFFIXES = {".py", ".pyi", ".mpy"}  # small, practical set
+
+        def is_ignored_dirname(name: str) -> bool:
+            return name in IGNORED_DIRS or any(
+                fnmatch.fnmatch(name, pat) for pat in IGNORED_NAME_GLOBS
+            )
+
+        def is_ignored_filename(name: str) -> bool:
+            return any(fnmatch.fnmatch(name, pat) for pat in IGNORED_FILE_GLOBS) or any(
+                fnmatch.fnmatch(name, pat) for pat in IGNORED_NAME_GLOBS
+            )
+
+        def is_control_file(name: str) -> bool:
+            if name in {"pyproject.toml", "setup.py", "setup.cfg", "MANIFEST.in"}:
+                return True
+            return name.endswith(".txt") and ("requirements" in name)
+
+        def walk_paths(base: Path) -> list[str]:
+            """All file paths under base (relative to root), minus cruft. Paths only (no mtimes)."""
+            out: list[str] = []
+            for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
+                dirnames[:] = [d for d in dirnames if not is_ignored_dirname(d)]
+                dirnames.sort()
+                filenames.sort()
+
+                dp = Path(dirpath)
+                for fn in filenames:
+                    if is_ignored_filename(fn):
+                        continue
+                    p = dp / fn
+                    # Keep to regular files (skip broken symlinks, etc.)
+                    try:
+                        if not p.is_file():
+                            continue
+                    except OSError:
+                        continue
+                    out.append(str(p.relative_to(root)))  # platform-native separators
+            out.sort()
+            return out
+
+        included_paths: list[str] = []
+
+        # (A) Always include everything under src/ if it exists
+        src_dir = root / "src"
+        if src_dir.is_dir():
+            included_paths.extend(walk_paths(src_dir))
+
+        # (B) Include top-level module-like files (.py/.pyi/.mpy)
+        # (C) Include top-level packages (contain __init__.py) + everything under them
+        for p in sorted(root.iterdir(), key=lambda x: x.name):
+            name = p.name
+            if p.is_dir():
+                if is_ignored_dirname(name):
                     continue
+                if (p / "__init__.py").is_file():  # no namespace packages
+                    included_paths.extend(walk_paths(p))
+            elif p.is_file():
+                if is_ignored_filename(name):
+                    continue
+                if p.suffix in MODULE_LIKE_SUFFIXES:
+                    included_paths.append(str(p.relative_to(root)))
 
-                info: Optional[PackageInstallationInfo] = installed_packages.get(
-                    canonical_name, None
-                )
-                if info is not None:
-                    result[canonical_name] = info
-                    meta = self.load_package_metadata(info)
+        # Deduplicate (src/ may contain a package that also exists top-level in odd repos)
+        included_paths = sorted(set(included_paths))
 
-                    collect_deps_names(meta.get("dependencies", []))
+        # Control file mtimes (ns) at top-level only
+        control_mtimes: list[tuple[str, int]] = []
+        for p in sorted(root.iterdir(), key=lambda x: x.name):
+            if p.is_file() and is_control_file(p.name):
+                try:
+                    st = p.stat()  # symlinks fine
+                except FileNotFoundError:
+                    continue
+                control_mtimes.append((str(p.relative_to(root)), int(st.st_mtime_ns)))
+        control_mtimes.sort()
 
-        collect_deps_names(specs)
+        # Hash
+        h = hashlib.sha256()
+        h.update(b"proj-fingerprint-v4\n")
+
+        h.update(b"included-paths\0")
+        for rel in included_paths:
+            h.update(rel.encode("utf-8"))
+            h.update(b"\n")
+
+        h.update(b"control-mtimes\0")
+        for rel, mtime_ns in control_mtimes:
+            h.update(rel.encode("utf-8"))
+            h.update(b"\0")
+            h.update(str(mtime_ns).encode("ascii"))
+            h.update(b"\n")
+
+        return h.hexdigest()
+
+    def compute_files_mapping(self, project_path: str, target_files: List[str]) -> Dict[str, str]:
+        result = {}
+        for rel_target_path in target_files:
+            # only search from src or project root
+            # We could consult build-backend's conf for better coverage, but maybe later
+            for root in [os.path.join(project_path, "src"), project_path]:
+                candidate_path = os.path.normpath(os.path.join(root, rel_target_path))
+                if os.path.isfile(candidate_path):
+                    rel_source_path = os.path.relpath(candidate_path, project_path)
+                    result[rel_target_path] = rel_source_path
+                    break
 
         return result
 
@@ -386,28 +553,38 @@ class Installer(ABC):
         target_metadata = deepcopy(source_package_meta)
         target_metadata["files"] = []
 
-        upload_map: Dict[str, str] = {}  # rel destination => abs source
+        upload_map: Dict[str, str] = {}  # rel destination => rel source (from source_dir)
 
         editable_info: Optional[EditableInfo] = source_package_meta.get("editable", None)
         if editable_info is not None:
-            assert len(source_package_meta["files"]) == 1
             del target_metadata["editable"]
 
-            for rel_target, rel_source in editable_info["files"]:
+            for rel_target, editable_project_source_path in editable_info["files"].items():
                 # TODO how to avoid uploading arbitrary files ? Should we?
                 # TODO: use join and normpath suitable for tmgr
-                upload_map[rel_target] = os.path.normpath(
-                    os.path.join(self.get_target_dir(), rel_source)
+                if os.path.isabs(editable_project_source_path):
+                    local_installation_source_path = editable_project_source_path
+                else:
+                    local_installation_source_path = os.path.normpath(
+                        os.path.join(target_metadata["project_path"], editable_project_source_path)
+                    )
+
+                upload_map[rel_target] = local_installation_source_path
+
+        for local_installation_source_path in source_package_meta["files"]:
+            if local_installation_source_path != source_package_info.rel_meta_file_path:
+                upload_map[local_installation_source_path] = local_installation_source_path
+
+        for target_rel_path, local_installation_source_path in upload_map.items():
+            if os.path.isabs(local_installation_source_path):
+                abs_source_path = local_installation_source_path
+            else:
+                abs_source_path = os.path.normpath(
+                    os.path.join(source_dir, local_installation_source_path)
                 )
 
-        else:
-            for rel_path in source_package_meta["files"]:
-                if rel_path != source_package_info.rel_meta_file_path:
-                    upload_map[rel_path] = os.path.join(source_dir, rel_path)
-
-        for target_rel_path, source_abs_path in upload_map.items():
             final_target_rel_path = self._tracker.smart_upload(
-                source_abs_path,
+                abs_source_path,
                 self._tmgr.get_default_target(),
                 target_rel_path,
                 compile,
@@ -432,3 +609,69 @@ class Installer(ABC):
 
     def get_normalized_no_deploy_packages(self) -> List[str]:
         return []
+
+    def locate_target_file_in_project(
+        self, rel_target_path: str, abs_project_path: str
+    ) -> Optional[str]:
+        for root in [os.path.join(abs_project_path, "src"), abs_project_path]:
+            candidate_path = os.path.normpath(os.path.join(root, rel_target_path))
+            if os.path.isfile(candidate_path):
+                return os.path.relpath(candidate_path, abs_project_path)
+
+        return None
+
+    def _make_installed_package_editable(
+        self, meta_path: str, old_meta: PackageMetadata, project_path: str
+    ) -> None:
+        assert self.supports_editable_installs()
+
+        new_meta = deepcopy(old_meta)
+
+        project_path = os.path.abspath(project_path)
+        editable_files: Dict[str, str] = self.compute_files_mapping(project_path, old_meta["files"])
+
+        for rel_target_path in editable_files:
+            # remove from static files
+            new_meta["files"].remove(rel_target_path)
+
+        project_fingerprint = self.compute_project_fingerprint(project_path)
+
+        new_meta["editable"] = EditableInfo(
+            project_fingerprint=project_fingerprint, files=editable_files
+        )
+
+        assert not os.path.isabs(meta_path)
+        self.save_package_metadata(rel_meta_path=meta_path, meta=new_meta)
+
+    def supports_editable_installs(self) -> bool:
+        return isinstance(self._tmgr, DirTargetManager)
+
+
+def looks_like_local_dir(spec: str) -> bool:
+    return (
+        spec.startswith(".") or spec.startswith("/") or spec.startswith("\\") or spec[1:3] == ":\\"
+    )
+
+
+def parse_pip_compatible_plain_spec(spec: str) -> ExtendedSpec:
+    if "@" in spec:
+        assert "=" not in spec and "<" not in spec and ">" not in spec
+        assert spec.count("@") == 1
+        name, location = spec.split("@")
+        # TODO: support file://
+    else:
+        ver_start = next((i for i, ch in enumerate(spec) if ch in "=!<>~"), -1)
+        assert ver_start != 0
+        if ver_start > 0:
+            name = spec[:ver_start]
+            location = None
+        elif looks_like_local_dir(spec):
+            name = None
+            location = spec
+        else:
+            name = spec
+            location = None
+
+    return ExtendedSpec(
+        extended_spec=spec, plain_spec=spec, name=name, location=location, editable=False
+    )

@@ -12,14 +12,18 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from minny.compiling import Compiler
-from minny.dir_target import DirTargetManager
-from minny.installer import META_ENCODING, EditableInfo, Installer, PackageMetadata
-from minny.pyproject_analyzer import collect_editable_package_metadata_from_pip_compatible_project
+from minny.installer import (
+    META_ENCODING,
+    EditableInfo,
+    ExtendedSpec,
+    Installer,
+    PackageMetadata,
+    parse_pip_compatible_plain_spec,
+)
 from minny.util import (
     get_venv_site_packages_path,
     normalize_name,
     parse_dist_info_dir_name,
-    parse_editable_spec,
     parse_json_file,
 )
 from packaging.utils import canonicalize_name, canonicalize_version
@@ -31,11 +35,6 @@ MANAGEMENT_FILES = ["easy_install.py"]
 
 
 class PipInstaller(Installer):
-    def collect_editable_package_metadata_from_project_dir(
-        self, project_path: str
-    ) -> PackageMetadata:
-        return collect_editable_package_metadata_from_pip_compatible_project(project_path)
-
     def canonicalize_package_name(self, name: str) -> str:
         return canonicalize_name(name)
 
@@ -53,8 +52,7 @@ class PipInstaller(Installer):
 
     def install(
         self,
-        specs: Optional[List[str]] = None,
-        editables: Optional[List[str]] = None,
+        extended_specs: List[str],
         no_deps: bool = False,
         compile: bool = True,
         mpy_cross: Optional[str] = None,
@@ -70,10 +68,7 @@ class PipInstaller(Installer):
         **_,
     ):
         logger.debug("Starting install")
-        specs = specs or []
-        editables = editables or []
-
-        self.validate_editables(editables)
+        parsed_extended_specs = [self.parse_extended_spec(s) for s in extended_specs]
 
         compiler = Compiler(self._tmgr, mpy_cross, self._minny_cache_dir)
 
@@ -90,10 +85,9 @@ class PipInstaller(Installer):
             args.append("--force-reinstall")
 
         args += self._format_selection_args(
-            specs=specs,
-            requirement_files=requirement_files,
+            specs=extended_specs,
+            requirement_files=requirement_files,  # TODO: need to know the whole list of specs, can't rely on unknown req files
             constraint_files=constraint_files,
-            editables=editables,
             pre=pre,
             no_deps=no_deps,
         )
@@ -138,11 +132,7 @@ class PipInstaller(Installer):
 
         for dist_info_dir in new_dist_info_dirs | changed_dist_info_dirs:
             self._install_package_from_temp_venv(
-                site_packages_dir,
-                dist_info_dir,
-                compile,
-                compiler,
-                editables,
+                site_packages_dir, dist_info_dir, compile, compiler, parsed_extended_specs
             )
 
         if new_dist_info_dirs or changed_dist_info_dirs:
@@ -152,10 +142,9 @@ class PipInstaller(Installer):
 
     def _format_selection_args(
         self,
-        specs: Optional[List[str]],
+        specs: List[str],
         requirement_files: Optional[List[str]],
         constraint_files: Optional[List[str]],
-        editables: Optional[List[str]],
         pre: bool,
         no_deps: bool,
     ):
@@ -171,32 +160,12 @@ class PipInstaller(Installer):
         if pre:
             args.append("--pre")
 
-        # Add editable packages with -e flag
-        for path in editables or []:
-            args += ["-e", path]
-
-        args += specs or []
+        args += specs
 
         return args
 
     def get_package_latest_version(self, name: str) -> Optional[str]:
         # TODO:
-        return None
-
-    def _find_original_spec(self, meta: PackageMetadata, all_specs: List[str]) -> Optional[str]:
-        editable_info = meta.get("editable")
-        if editable_info is None:
-            return None
-
-        abs_norm_project_path = os.path.normcase(
-            os.path.normpath(os.path.abspath(editable_info["project_path"]))
-        )
-
-        for spec in all_specs:
-            name, path = parse_editable_spec(spec)
-            if os.path.normcase(os.path.normpath(os.path.abspath(path))) == abs_norm_project_path:
-                return spec
-
         return None
 
     def _install_package_from_temp_venv(
@@ -205,42 +174,64 @@ class PipInstaller(Installer):
         dist_info_dir_name: str,
         compile: bool,
         compiler: Compiler,
-        all_editables: List[str],
+        all_requested_specs: List[ExtendedSpec],
     ) -> None:
         canonical_name, version = parse_dist_info_dir_name(dist_info_dir_name)
-        self._report_progress(f"Copying {canonical_name} {version}", end="")
+        self._report_progress(f"Copying {canonical_name} {version}")
 
         meta = read_essential_metadata_from_dist_info_dir(
             venv_site_packages_dir, dist_info_dir_name
         )
 
-        editable_info = meta.get("editable")
-        if editable_info is not None:
-            assert isinstance(self._tmgr, DirTargetManager)
+        # Detect and tweak local installs meta
+        abs_editable_project_path = None
+        if meta["project_path"] is not None:
+            abs_editable_project_path = os.path.abspath(meta["project_path"])
+            for espec in all_requested_specs:
+                if espec.location is not None and os.path.normpath(
+                    os.path.normcase(os.path.abspath(espec.location))
+                ) == os.path.normpath(os.path.normcase(abs_editable_project_path)):
+                    meta["project_path"] = self.reanchor_at_lib_dir(meta["project_path"])
+                    if espec.editable:
+                        abs_editable_project_path = os.path.abspath(meta["project_path"])
+                        assert self.supports_editable_installs()
 
-            # For consistence, we need to override installed meta info with info collected from source,
-            # even if the result is less precise
-            meta = self.collect_editable_package_metadata_from_project_dir(
-                editable_info["project_path"]
-            )
-            self.tweak_editable_project_path(meta, self._find_original_spec(meta, all_editables))
-        else:
-            rel_paths = read_package_file_paths_from_dist_info_dir(
-                venv_site_packages_dir, dist_info_dir_name
-            )
-            meta["files"] = []
-            for rel_path in rel_paths:
-                final_rel_path = self._tracker.smart_upload(
-                    os.path.join(venv_site_packages_dir, rel_path),
-                    self.get_target_dir(),
-                    rel_path,
-                    compile,
-                    compiler,
+                    break
+
+        rel_paths = read_package_file_paths_from_dist_info_dir(
+            venv_site_packages_dir, dist_info_dir_name
+        )
+        meta["files"] = []
+        editable_files: Dict[str, str] = {}
+
+        for site_packages_rel_path in rel_paths:
+            if abs_editable_project_path:
+                assert abs_editable_project_path is not None
+                project_rel_path = self.locate_target_file_in_project(
+                    site_packages_rel_path, abs_editable_project_path
                 )
-                meta["files"].append(final_rel_path)
+                if project_rel_path is not None:
+                    target_rel_path = site_packages_rel_path.replace("\\", "/")
+                    editable_files[target_rel_path] = project_rel_path
+                    continue
+
+            final_rel_path = self._tracker.smart_upload(
+                os.path.join(venv_site_packages_dir, site_packages_rel_path),
+                self.get_target_dir(),
+                site_packages_rel_path,
+                compile,
+                compiler,
+            )
+            meta["files"].append(final_rel_path)
 
         rel_meta_path = self.get_relative_metadata_path(canonical_name, version)
         meta["files"].append(rel_meta_path)
+
+        if abs_editable_project_path is not None:
+            meta["editable"] = EditableInfo(
+                project_fingerprint=self.compute_project_fingerprint(abs_editable_project_path),
+                files=editable_files,
+            )
 
         self.save_package_metadata(rel_meta_path, meta)
         self._tracker.register_package_install(
@@ -437,6 +428,9 @@ class PipInstaller(Installer):
             "typing-extensions",
         ]
 
+    def _parse_plain_spec(self, plain_spec: str) -> ExtendedSpec:
+        return parse_pip_compatible_plain_spec(plain_spec)
+
 
 def read_package_file_paths_from_dist_info_dir(
     site_packages_dir: str, dist_info_dir_name: str
@@ -511,16 +505,13 @@ def read_essential_metadata_from_dist_info_dir(
     direct_url_file_path = os.path.join(dist_info_dir_path, "direct_url.json")
     if os.path.isfile(direct_url_file_path):
         direct_url_data = parse_json_file(direct_url_file_path)
-        if direct_url_data.get("dir_info", {}).get("editable", False):
-            url = direct_url_data.get("url", None)
-            assert url is not None
-            assert url.startswith("file://")
-            from urllib.parse import urlparse
-            from urllib.request import url2pathname
+        url = direct_url_data.get("url", None)
+        assert url is not None
+        assert url.startswith("file://")
+        from urllib.parse import urlparse
+        from urllib.request import url2pathname
 
-            project_path = url2pathname(urlparse(url).path)
-
-            result["editable"] = EditableInfo(project_path=project_path, files={}, module_roots=[])
+        result["project_path"] = url2pathname(urlparse(url).path)
 
     return result
 

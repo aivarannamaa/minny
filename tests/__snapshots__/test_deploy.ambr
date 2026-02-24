@@ -12,7 +12,8 @@
     '.pip/adafruit_circuitpython_framebuf-1.6.10.meta': 354,
     '.pip/adafruit_circuitpython_requests-4.1.15.meta': 411,
     '.pip/adafruit_circuitpython_ssd1306-2.12.22.meta': 406,
-    'adafruit_74hc595.mpy': 1863,
+    '.pip/simple_app_project-1.0.0.meta': 147,
+    'adafruit_74hc595.mpy': 1861,
     'adafruit_bus_device': -1,
     'adafruit_bus_device/__init__.mpy': 129,
     'adafruit_bus_device/i2c_device.mpy': 1256,
@@ -38,5 +39,6 @@
     'adafruit_mcp230xx/mcp23xxx.mpy': 601,
     'adafruit_requests.mpy': 7105,
     'adafruit_ssd1306.mpy': 2891,
+    'dummy.mpy': 102,
   })
 # ---

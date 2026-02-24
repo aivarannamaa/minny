@@ -272,14 +272,6 @@ def read_requirements_from_txt_file(path: str) -> List[str]:
     return result
 
 
-def parse_editable_spec(spec: str) -> Tuple[Optional[str], str]:
-    parts = spec.split("@", maxsplit=1)
-    if len(parts) == 2:
-        return parts[0].strip(), parts[1].strip()
-    else:
-        return None, spec.strip()
-
-
 def find_volumes_by_name(volume_name: str) -> Sequence[str]:
     volumes = list_volumes()
     if os.name == "nt":
@@ -322,3 +314,10 @@ def get_win_volume_name(path: str) -> str:
 def try_sync_local_filesystem():
     if hasattr(os, "sync"):
         os.sync()
+
+
+def resolve_with_anchor(path: str, anchor: str) -> str:
+    if os.path.isabs(path):
+        return path
+
+    return os.path.normpath(os.path.join(anchor, path))

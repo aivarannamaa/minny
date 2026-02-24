@@ -13,6 +13,7 @@
     '.pip/adafruit_circuitpython_requests-4.1.15.meta',
     '.pip/adafruit_circuitpython_ssd1306-2.12.22.meta',
     '.pip/adafruit_circuitpython_typing-1.12.3.meta',
+    '.pip/simple_app_project-1.0.0.meta',
     '.pip/typing_extensions-4.15.0.meta',
     'adafruit_74hc595.py',
     'adafruit_bus_device',
