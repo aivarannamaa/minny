@@ -18,6 +18,7 @@ from minny import get_default_minny_cache_dir
 from minny.common import UserError
 from minny.compiling import Compiler
 from minny.installer import (
+    EditableInfo,
     ExtendedSpec,
     Installer,
     PackageMetadata,
@@ -339,12 +340,13 @@ class CircupInstaller(Installer):
         compiler: Compiler,
     ):
         # TODO: add actual name instead of canonical, license, summary, urls
-        meta = PackageMetadata(name=canonical_name, version=version, files=[])
-        if espec.location is not None:
-            meta["project_path"] = espec.location
+        meta = PackageMetadata(
+            name=canonical_name, version=version, files=[], requirement=espec.extended_spec
+        )
 
         src_lib_dir = os.path.join(build_path, "lib")
         assert os.path.isdir(src_lib_dir)
+        editable_files: Dict[str, str] = {}
 
         for root, dirs, files in os.walk(src_lib_dir):
             rel_root = os.path.relpath(root, src_lib_dir)
@@ -352,6 +354,16 @@ class CircupInstaller(Installer):
             for file_name in files:
                 source_abs_path = os.path.join(root, file_name)
                 target_rel_path = self._tmgr.join_path(rel_root, file_name)
+
+                if espec.editable:
+                    assert espec.location is not None
+                    project_rel_path = self.locate_target_file_in_project(
+                        target_rel_path, os.path.abspath(espec.location)
+                    )
+                    if project_rel_path is not None:
+                        editable_files[target_rel_path] = project_rel_path
+                        continue
+
                 final_target_rel_path = self._tracker.smart_upload(
                     source_abs_path, target_dir, target_rel_path, compile, compiler
                 )
@@ -362,6 +374,16 @@ class CircupInstaller(Installer):
 
         meta_path = self.get_relative_metadata_path(canonical_name, version)
         meta["files"].append(meta_path)
+
+        if espec.editable:
+            assert espec.location is not None
+            meta["editable"] = EditableInfo(
+                project_path=espec.location
+                if os.path.isabs(espec.location)
+                else self.reanchor_at_lib_dir(espec.location),
+                project_fingerprint=self.compute_project_fingerprint(espec.location),
+                files=editable_files,
+            )
 
         self.save_package_metadata(meta_path, meta)
         self._tracker.register_package_install(
@@ -382,10 +404,6 @@ class CircupInstaller(Installer):
                     compile=compile,
                     compiler=compiler,
                 )
-
-        if espec.editable:
-            assert espec.location is not None
-            self._make_installed_package_editable(meta_path, meta, espec.location)
 
     def _find_package_deps_from_source(self, build_path, canonical_name) -> List[str]:
         all_reqs = []

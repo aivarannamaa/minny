@@ -69,6 +69,7 @@ class PipInstaller(Installer):
     ):
         logger.debug("Starting install")
         parsed_extended_specs = [self.parse_extended_spec(s) for s in extended_specs]
+        plain_specs = [e.plain_spec for e in parsed_extended_specs]
 
         compiler = Compiler(self._tmgr, mpy_cross, self._minny_cache_dir)
 
@@ -85,7 +86,7 @@ class PipInstaller(Installer):
             args.append("--force-reinstall")
 
         args += self._format_selection_args(
-            specs=extended_specs,
+            specs=plain_specs,
             requirement_files=requirement_files,  # TODO: need to know the whole list of specs, can't rely on unknown req files
             constraint_files=constraint_files,
             pre=pre,
@@ -117,10 +118,10 @@ class PipInstaller(Installer):
             if name in state_before and state_after[name] != state_before[name]
         }
 
-        if new_dist_info_dirs or changed_dist_info_dirs:
+        if new_dist_info_dirs or sorted(changed_dist_info_dirs):
             self._report_progress("Starting to apply changes to the target.")
 
-        for dist_info_dir in changed_dist_info_dirs:
+        for dist_info_dir in sorted(changed_dist_info_dirs):
             self._report_progress(
                 f"Removing old version of {parse_dist_info_dir_name(dist_info_dir)[0]}"
             )
@@ -130,7 +131,7 @@ class PipInstaller(Installer):
 
             self._uninstall_package(dist_name)
 
-        for dist_info_dir in new_dist_info_dirs | changed_dist_info_dirs:
+        for dist_info_dir in sorted(new_dist_info_dirs | changed_dist_info_dirs):
             self._install_package_from_temp_venv(
                 site_packages_dir, dist_info_dir, compile, compiler, parsed_extended_specs
             )
@@ -179,24 +180,14 @@ class PipInstaller(Installer):
         canonical_name, version = parse_dist_info_dir_name(dist_info_dir_name)
         self._report_progress(f"Copying {canonical_name} {version}")
 
-        meta = read_essential_metadata_from_dist_info_dir(
+        meta = self._read_essential_metadata_from_dist_info_dir(
             venv_site_packages_dir, dist_info_dir_name
         )
-
-        # Detect and tweak local installs meta
-        abs_editable_project_path = None
-        if meta["project_path"] is not None:
-            abs_editable_project_path = os.path.abspath(meta["project_path"])
-            for espec in all_requested_specs:
-                if espec.location is not None and os.path.normpath(
-                    os.path.normcase(os.path.abspath(espec.location))
-                ) == os.path.normpath(os.path.normcase(abs_editable_project_path)):
-                    meta["project_path"] = self.reanchor_at_lib_dir(meta["project_path"])
-                    if espec.editable:
-                        abs_editable_project_path = os.path.abspath(meta["project_path"])
-                        assert self.supports_editable_installs()
-
-                    break
+        espec = self._try_recover_original_spec(
+            venv_site_packages_dir, dist_info_dir_name, all_requested_specs
+        )
+        if espec is not None:
+            meta["requirement"] = espec.extended_spec
 
         rel_paths = read_package_file_paths_from_dist_info_dir(
             venv_site_packages_dir, dist_info_dir_name
@@ -205,10 +196,10 @@ class PipInstaller(Installer):
         editable_files: Dict[str, str] = {}
 
         for site_packages_rel_path in rel_paths:
-            if abs_editable_project_path:
-                assert abs_editable_project_path is not None
+            if espec is not None and espec.editable:
+                assert espec.location is not None
                 project_rel_path = self.locate_target_file_in_project(
-                    site_packages_rel_path, abs_editable_project_path
+                    site_packages_rel_path, os.path.abspath(espec.location)
                 )
                 if project_rel_path is not None:
                     target_rel_path = site_packages_rel_path.replace("\\", "/")
@@ -227,9 +218,13 @@ class PipInstaller(Installer):
         rel_meta_path = self.get_relative_metadata_path(canonical_name, version)
         meta["files"].append(rel_meta_path)
 
-        if abs_editable_project_path is not None:
+        if espec is not None and espec.editable:
+            assert espec.location is not None
             meta["editable"] = EditableInfo(
-                project_fingerprint=self.compute_project_fingerprint(abs_editable_project_path),
+                project_path=espec.location
+                if os.path.isabs(espec.location)
+                else self.reanchor_at_lib_dir(espec.location),
+                project_fingerprint=self.compute_project_fingerprint(espec.location),
                 files=editable_files,
             )
 
@@ -431,6 +426,96 @@ class PipInstaller(Installer):
     def _parse_plain_spec(self, plain_spec: str) -> ExtendedSpec:
         return parse_pip_compatible_plain_spec(plain_spec)
 
+    def _read_essential_metadata_from_dist_info_dir(
+        self,
+        site_packages_dir: str,
+        dist_info_dir_name: str,
+    ) -> PackageMetadata:
+        dist_info_dir_path = os.path.join(site_packages_dir, dist_info_dir_name)
+        metadata_file_path = os.path.join(dist_info_dir_path, "METADATA")
+        metadata_text = Path(metadata_file_path).read_text(encoding="utf-8")
+
+        msg = email.message_from_string(metadata_text)
+
+        name = msg["Name"]
+        version = msg["Version"]
+        summary = msg.get("Summary")
+
+        meta = PackageMetadata(name=name, version=version, files=[])
+        if summary is not None:
+            meta["summary"] = summary
+
+        project_urls: Dict[str, str] = {}
+        for value in msg.get_all("Project-URL", []):
+            # Expected form: "Label, https://example.com"
+            parts = [p.strip() for p in value.split(",", 1)]
+            if len(parts) == 2:
+                label, url = parts
+            else:
+                # Malformed; use entire string as label, empty URL
+                label, url = value.strip(), ""
+
+            label = label.replace(" ", "").replace("-", "").lower()
+            if label:
+                project_urls[label] = url
+
+        deprecated_homepage_url = msg.get("Home-page") or msg.get("Home-Page")
+        if "homepage" not in project_urls and deprecated_homepage_url:
+            project_urls["homepage"] = deprecated_homepage_url
+
+        deprecated_download_url = msg.get("Download-URL")
+        if "download" not in project_urls and deprecated_download_url:
+            project_urls["download"] = deprecated_download_url
+
+        if project_urls:
+            meta["project_urls"] = project_urls
+
+        dependencies = msg.get_all("Requires-Dist")
+        if dependencies:
+            meta["dependencies"] = dependencies
+
+        return meta
+
+    def _try_recover_original_spec(
+        self,
+        site_packages_dir: str,
+        dist_info_dir_name: str,
+        all_requested_specs: List[ExtendedSpec],
+    ) -> Optional[ExtendedSpec]:
+        # main challenge: the spec may have been given by path, not name
+
+        direct_url_file_path = os.path.join(
+            site_packages_dir, dist_info_dir_name, "direct_url.json"
+        )
+        recorded_abs_project_path = None
+        parsed_name, _ = parse_dist_info_dir_name(dist_info_dir_name)
+
+        if os.path.isfile(direct_url_file_path):
+            direct_url_data = parse_json_file(direct_url_file_path)
+            url = direct_url_data.get("url", None)
+            assert url is not None
+            assert url.startswith("file://")  # TODO: too strong assumption
+            from urllib.parse import urlparse
+            from urllib.request import url2pathname
+
+            recorded_abs_project_path = url2pathname(urlparse(url).path)
+
+        for espec in all_requested_specs:
+            if espec.name is not None and self.canonicalize_package_name(
+                espec.name
+            ) == self.canonicalize_package_name(parsed_name):
+                return espec
+
+            if (
+                espec.location is not None
+                and recorded_abs_project_path is not None
+                and os.path.normpath(os.path.normcase(os.path.abspath(espec.location)))
+                == os.path.normpath(os.path.normcase(recorded_abs_project_path))
+            ):
+                return espec
+
+        return None
+
 
 def read_package_file_paths_from_dist_info_dir(
     site_packages_dir: str, dist_info_dir_name: str
@@ -452,66 +537,6 @@ def read_package_file_paths_from_dist_info_dir(
 
             logger.debug(f"Including {path}, dist_info_dir_name: {dist_info_dir_name}")
             result.append(path)
-
-    return result
-
-
-def read_essential_metadata_from_dist_info_dir(
-    site_packages_dir: str, dist_info_dir_name: str
-) -> PackageMetadata:
-    dist_info_dir_path = os.path.join(site_packages_dir, dist_info_dir_name)
-    metadata_file_path = os.path.join(dist_info_dir_path, "METADATA")
-    metadata_text = Path(metadata_file_path).read_text(encoding="utf-8")
-
-    msg = email.message_from_string(metadata_text)
-
-    name = msg["Name"]
-    version = msg["Version"]
-    summary = msg.get("Summary")
-
-    result = PackageMetadata(name=name, version=version, files=[])
-    if summary is not None:
-        result["summary"] = summary
-
-    project_urls: Dict[str, str] = {}
-    for value in msg.get_all("Project-URL", []):
-        # Expected form: "Label, https://example.com"
-        parts = [p.strip() for p in value.split(",", 1)]
-        if len(parts) == 2:
-            label, url = parts
-        else:
-            # Malformed; use entire string as label, empty URL
-            label, url = value.strip(), ""
-
-        label = label.replace(" ", "").replace("-", "").lower()
-        if label:
-            project_urls[label] = url
-
-    deprecated_homepage_url = msg.get("Home-page") or msg.get("Home-Page")
-    if "homepage" not in project_urls and deprecated_homepage_url:
-        project_urls["homepage"] = deprecated_homepage_url
-
-    deprecated_download_url = msg.get("Download-URL")
-    if "download" not in project_urls and deprecated_download_url:
-        project_urls["download"] = deprecated_download_url
-
-    if project_urls:
-        result["urls"] = project_urls
-
-    dependencies = msg.get_all("Requires-Dist")
-    if dependencies:
-        result["dependencies"] = dependencies
-
-    direct_url_file_path = os.path.join(dist_info_dir_path, "direct_url.json")
-    if os.path.isfile(direct_url_file_path):
-        direct_url_data = parse_json_file(direct_url_file_path)
-        url = direct_url_data.get("url", None)
-        assert url is not None
-        assert url.startswith("file://")
-        from urllib.parse import urlparse
-        from urllib.request import url2pathname
-
-        result["project_path"] = url2pathname(urlparse(url).path)
 
     return result
 

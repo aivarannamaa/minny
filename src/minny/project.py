@@ -16,7 +16,7 @@ from minny.pip import PipInstaller
 from minny.settings import load_minny_settings_from_pyproject_toml
 from minny.target import TargetManager
 from minny.tracking import DummyTracker, Tracker
-from minny.util import parse_json_file, parse_toml_file, resolve_with_anchor
+from minny.util import parse_json_file, parse_toml_file
 
 logger = getLogger(__name__)
 
@@ -180,16 +180,16 @@ class ProjectManager:
         def collect_required_metas(_especs: List[str]) -> None:
             for espec_str in _especs:
                 espec = installer.parse_extended_spec(espec_str)
-                if espec.is_local_dir_spec():
-                    assert espec.location is not None
-                    meta = self._find_meta_by_project_path(
-                        resolve_with_anchor(espec.location, self._project_dir), metas
-                    )
-                    assert meta is not None
-                    name = installer.canonicalize_package_name(meta["name"])
-                else:
-                    assert espec.name is not None
+                if espec.name is not None:
                     name = espec.name
+                else:
+                    assert espec.location is not None
+                    assert espec.is_local_dir_spec()
+                    candidates = [
+                        m for m in metas.values() if m.get("requirement") == espec.extended_spec
+                    ]
+                    assert len(candidates) == 1
+                    name = installer.canonicalize_package_name(candidates[0]["name"])
 
                 canonical_name = installer.canonicalize_package_name(name)
                 if canonical_name in result:
@@ -204,20 +204,6 @@ class ProjectManager:
         collect_required_metas(espec_strings)
 
         return result
-
-    def _find_meta_by_project_path(
-        self, abs_project_path: str, metas: Dict[str, PackageMetadata]
-    ) -> Optional[PackageMetadata]:
-        for meta in metas.values():
-            candidate_project_path = meta.get("project_path", None)
-            if candidate_project_path is None:
-                continue
-
-            abs_candidate_path = resolve_with_anchor(candidate_project_path, self._lib_dir)
-            if os.path.normcase(abs_candidate_path) == os.path.normcase(abs_project_path):
-                return meta
-
-        return None
 
     def _clean_up_local_lib(self, all_relevant_files: List[str]) -> None:
         # Remove orphaned files not part of any package
@@ -264,7 +250,7 @@ class ProjectManager:
                     packages_to_deploy, deploy_spec.compile, deploy_spec.no_compile
                 )
 
-                for canonical_name in packages_to_deploy:
+                for canonical_name in sorted(packages_to_deploy):
                     source_info = synced_packages_infos[canonical_name]
                     source_meta = source_installer.load_package_metadata(source_info)
                     target_installer.smart_deploy_or_replace_locally_installed_package(
@@ -393,29 +379,3 @@ class ProjectManager:
         return os.path.join(self._minny_cache_dir, "projects", project_hash + ".json")
 
 
-def _parse_dependency_specs(extended_specs: List[str]) -> Tuple[List[str], List[str]]:
-    plain_specs = []
-    editable_specs = []
-
-    for spec in extended_specs:
-        trimmed_spec = spec.strip()
-
-        # Empty specs are configuration errors
-        if not trimmed_spec:
-            raise UserError("Empty dependency specification is not allowed")
-
-        parts = trimmed_spec.split(maxsplit=1)
-
-        if parts[0] == "-e":
-            # Editable package specification
-            if len(parts) != 2:
-                raise UserError(
-                    f"Invalid editable dependency specification: '{spec}' - missing package path"
-                )
-
-            package_path = parts[1]
-            editable_specs.append(package_path)
-
-        plain_specs.append(trimmed_spec)
-
-    return plain_specs, editable_specs

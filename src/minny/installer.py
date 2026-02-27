@@ -47,6 +47,7 @@ class ExtendedSpec:
 
 
 class EditableInfo(TypedDict):
+    project_path: str  # absolute or relative to lib dir
     project_fingerprint: str
     files: Dict[
         str, str
@@ -59,11 +60,9 @@ class PackageMetadata(TypedDict):
     summary: NotRequired[str]
     license: NotRequired[str]
     dependencies: NotRequired[List[str]]
-    urls: NotRequired[Dict[str, str]]
+    project_urls: NotRequired[Dict[str, str]]
     files: List[str]
-    project_path: NotRequired[
-        str
-    ]  # relative to lib dir or absolute if given as absolute in the spec
+    requirement: NotRequired[str]
     editable: NotRequired[EditableInfo]
 
 
@@ -320,13 +319,13 @@ class Installer(ABC):
     def deslug_package_version(self, version: str) -> str: ...
 
     def parse_extended_spec(self, extended_spec: str) -> ExtendedSpec:
-        parts = extended_spec.split()
-        if len(parts) == 1:
-            editable = False
-            plain_spec = self._parse_plain_spec(extended_spec)
-        elif len(parts) == 2 and parts[0] == "-e":
+        parts = extended_spec.split(maxsplit=1)
+        if len(parts) == 2 and parts[0] == "-e":
             editable = True
             plain_spec = self._parse_plain_spec(parts[1])
+        elif parts[0] != "-e":
+            editable = False
+            plain_spec = self._parse_plain_spec(extended_spec)
         else:
             raise ValueError(f"Unsupported spec: {extended_spec!r}")
 
@@ -469,20 +468,6 @@ class Installer(ABC):
 
         return h.hexdigest()
 
-    def compute_files_mapping(self, project_path: str, target_files: List[str]) -> Dict[str, str]:
-        result = {}
-        for rel_target_path in target_files:
-            # only search from src or project root
-            # We could consult build-backend's conf for better coverage, but maybe later
-            for root in [os.path.join(project_path, "src"), project_path]:
-                candidate_path = os.path.normpath(os.path.join(root, rel_target_path))
-                if os.path.isfile(candidate_path):
-                    rel_source_path = os.path.relpath(candidate_path, project_path)
-                    result[rel_target_path] = rel_source_path
-                    break
-
-        return result
-
     def smart_deploy_or_replace_locally_installed_package(
         self,
         source_dir: str,
@@ -566,7 +551,7 @@ class Installer(ABC):
                     local_installation_source_path = editable_project_source_path
                 else:
                     local_installation_source_path = os.path.normpath(
-                        os.path.join(target_metadata["project_path"], editable_project_source_path)
+                        os.path.join(editable_info["project_path"], editable_project_source_path)
                     )
 
                 upload_map[rel_target] = local_installation_source_path
@@ -575,7 +560,7 @@ class Installer(ABC):
             if local_installation_source_path != source_package_info.rel_meta_file_path:
                 upload_map[local_installation_source_path] = local_installation_source_path
 
-        for target_rel_path, local_installation_source_path in upload_map.items():
+        for target_rel_path, local_installation_source_path in sorted(upload_map.items()):
             if os.path.isabs(local_installation_source_path):
                 abs_source_path = local_installation_source_path
             else:
@@ -619,29 +604,6 @@ class Installer(ABC):
                 return os.path.relpath(candidate_path, abs_project_path)
 
         return None
-
-    def _make_installed_package_editable(
-        self, meta_path: str, old_meta: PackageMetadata, project_path: str
-    ) -> None:
-        assert self.supports_editable_installs()
-
-        new_meta = deepcopy(old_meta)
-
-        project_path = os.path.abspath(project_path)
-        editable_files: Dict[str, str] = self.compute_files_mapping(project_path, old_meta["files"])
-
-        for rel_target_path in editable_files:
-            # remove from static files
-            new_meta["files"].remove(rel_target_path)
-
-        project_fingerprint = self.compute_project_fingerprint(project_path)
-
-        new_meta["editable"] = EditableInfo(
-            project_fingerprint=project_fingerprint, files=editable_files
-        )
-
-        assert not os.path.isabs(meta_path)
-        self.save_package_metadata(rel_meta_path=meta_path, meta=new_meta)
 
     def supports_editable_installs(self) -> bool:
         return isinstance(self._tmgr, DirTargetManager)
