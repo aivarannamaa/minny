@@ -69,14 +69,14 @@ Once you have your dependencies declared in _pyproject.toml_, you would run:
 > minny sync
 ```
 
-This makes Minny download and install all dependencies into the _lib_ subfolder of your project (just like `uv sync` creates or updates the _.venv_ folder).
+This makes Minny download and install all dependencies into the _.minny/lib_ subfolder of your project (just like `uv sync` creates or updates the _.venv_ folder).
 
 Now you have a folder of .py files, which you can feed to your type-checker or IDE's language server. For example, if you're using [Basedpyright](https://github.com/DetachHead/basedpyright), you would configure it like this:
 
 ```toml
 [tool.basedpyright]
 ...
-extraPaths = ["lib"]
+extraPaths = [".minny/lib"]
 ...
 ```
 
@@ -104,7 +104,7 @@ stubPath = "typings" # this is actually the default value, so I could have omitt
 ...
 ```
 
-> **Note:** Just like with the "lib" folder, you don't need to keep the "typeshed" and "typings" folders under version control—Minny has enough information to recreate them when required.
+> **Note:** Just like with the ".minny/lib" folder, you don't need to keep the "typeshed" and "typings" folders under version control—Minny has enough information to recreate them when required.
 
 #### More about type stubs
 TODO: move this to documentation
@@ -156,9 +156,9 @@ minny --port COM4 deploy
 
 Under the hood, this command performs the following steps:
 
-1. Perform a `minny sync` to make sure the _lib_ folder is in sync with your project specification.
+1. Perform a `minny sync` to make sure the _.minny/lib_ folder is in sync with your project specification.
 2. Transfer all dependencies to your device's `lib` folder. By default, Minny compiles .py files to .mpy files on the fly.
-3. If the project represents a package, build it and transfer the files to the `lib` folder, just like the dependencies.
+3. If the project itself represents a package, build it and transfer the files to the `lib` folder, just like the dependencies. (TODO: explain editable installs in sync section)
 4. Copy the main files (e.g., _main.py_, _code.py_, _boot.py_, and helper modules) to the device's main folder, according to the deploy rules specified in _pyproject.toml_.
 
 Now you can press Ctrl-D on your device and test your program. If you're not satisfied, edit some files and invoke the same command again—this time it will be faster as only changed files need to be updated on the device.

@@ -26,7 +26,7 @@ def test_sync_command(snapshot):
     # Get paths
     test_data_dir = Path(__file__).parent / "data" / "projects" / "simple-app-project"
     project_dir = test_data_dir.absolute()
-    actual_lib_dir = project_dir / "lib"
+    actual_lib_dir = project_dir / ".minny" / "lib"
 
     # Clean up any existing lib directory
     if actual_lib_dir.exists():

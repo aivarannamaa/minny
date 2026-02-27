@@ -8,4 +8,3 @@ circup = ["adafruit_character_lcd==3.5.3"]
 
 [tool.setuptools]
 py-modules = ["dummy"]
-packages = []

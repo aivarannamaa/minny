@@ -42,7 +42,7 @@ class ProjectManager:
         minny_cache_dir: Optional[str] = None,
     ):
         self._project_dir = project_dir
-        self._lib_dir = os.path.join(self._project_dir, "lib")
+        self._lib_dir = os.path.join(self._project_dir, ".minny", "lib")
         self._lib_dir_mgr = DirTargetManager(self._lib_dir)
         self._minny_cache_dir = minny_cache_dir or get_default_minny_cache_dir()
         self._tmgr = tmgr
