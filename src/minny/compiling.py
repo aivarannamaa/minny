@@ -31,17 +31,17 @@ class Compiler:
         self._user_mpy_cross_path = mpy_cross_path
         self._configuration_hash: Optional[str] = None
 
-    def compile_to_bytes(self, source_path: str) -> bytes:
+    def compile_to_bytes(self, source_path: str, embedded_source_path: str) -> bytes:
         temp_path = os.path.join(tempfile.gettempdir(), str(uuid.uuid4()))
-        self.compile_to_file(source_path, temp_path)
+        self.compile_to_file(source_path, temp_path, embedded_source_path)
         with open(temp_path, "rb") as fp:
             result = fp.read()
 
         os.remove(temp_path)
         return result
 
-    def compile_to_file(self, source_path: str, target_path: str) -> None:
-        args = self._get_path_with_options() + ["-o", target_path, source_path]
+    def compile_to_file(self, source_path: str, target_path: str, embedded_source_path: str) -> None:
+        args = self._get_path_with_options() + ["-o", target_path, "-s", embedded_source_path, source_path]
         subprocess.check_call(args, executable=args[0], stdin=subprocess.DEVNULL)
 
     def get_module_format(self) -> str:

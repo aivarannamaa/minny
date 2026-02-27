@@ -85,6 +85,9 @@ class Tracker:
         force: bool = False,
     ) -> str:
         module_format: Optional[str] = None
+        original_target_rel_path = target_rel_path
+        assert "\\" not in original_target_rel_path
+
         if target_rel_path.endswith(".py"):
             if compile:
                 target_rel_path = target_rel_path[:-3] + ".mpy"
@@ -109,7 +112,7 @@ class Tracker:
             return target_rel_path
 
         if compile:
-            content = compiler.compile_to_bytes(source_abs_path)
+            content = compiler.compile_to_bytes(source_abs_path, original_target_rel_path)
         else:
             with open(source_abs_path, "rb") as fp:
                 content = fp.read()
