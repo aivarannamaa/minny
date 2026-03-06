@@ -22,12 +22,11 @@ class DirTargetManager(TargetManager):
         super().__init__()
 
     def get_dir_sep(self) -> str:
-        return "/"
+        return os.path.sep
 
     def try_get_stat(self, path: str) -> Optional[os.stat_result]:
-        local_path = self.convert_to_local_path(path)
         try:
-            return os.stat(local_path)
+            return os.stat(path)
         except OSError:
             return None
 
@@ -45,13 +44,12 @@ class DirTargetManager(TargetManager):
         callback: Callable[[int, int], None],
         interrupt_event: threading.Event,
     ) -> int:
-        local_path = self.convert_to_local_path(source_path)
         block_size = self._get_file_operation_block_size() * 4
-        file_size = os.path.getsize(local_path)
+        file_size = os.path.getsize(source_path)
 
         read_bytes = 0
 
-        with open(local_path, "rb") as fp:
+        with open(source_path, "rb") as fp:
             while True:
                 if interrupt_event.is_set():
                     raise InterruptedError()
@@ -67,46 +65,36 @@ class DirTargetManager(TargetManager):
     def write_file_ex(
         self, path: str, source_fp: BinaryIO, file_size: int, callback: Callable[[int, int], None]
     ) -> int:
-        local_path = self.convert_to_local_path(path)
-        return self._write_local_file_ex(local_path, source_fp, file_size, callback)
+        return self._write_local_file_ex(path, source_fp, file_size, callback)
 
     def remove_file_if_exists(self, path: str) -> bool:
-        local_path = self.convert_to_local_path(path)
-        if os.path.exists(local_path):
-            os.remove(local_path)
+        if os.path.exists(path):
+            os.remove(path)
             return True
         else:
             return False
 
     def remove_dir_if_empty(self, path: str) -> bool:
-        local_path = self.convert_to_local_path(path)
-        assert os.path.isdir(local_path)
-        content = os.listdir(local_path)
+        assert os.path.isdir(path)
+        content = os.listdir(path)
         if content:
             return False
         else:
-            os.rmdir(local_path)
+            os.rmdir(path)
             if path in self._ensured_directories:
                 self._ensured_directories.remove(path)
             return True
 
     def mkdir_in_existing_parent_exists_ok(self, path: str) -> None:
-        local_path = self.convert_to_local_path(path)
-        if not os.path.isdir(local_path):
-            assert not os.path.exists(local_path)
-            os.mkdir(local_path, 0o755)
-
-    def convert_to_local_path(self, device_path: str) -> str:
-        assert device_path.startswith("/")
-        return os.path.normpath(self.base_path + device_path)
+        if not os.path.isdir(path):
+            assert not os.path.exists(path)
+            os.mkdir(path, 0o755)
 
     def listdir(self, path: str) -> List[str]:
-        local_path = self.convert_to_local_path(path)
-        return os.listdir(local_path)
+        return os.listdir(path)
 
     def rmdir(self, path: str) -> None:
-        local_path = self.convert_to_local_path(path)
-        os.rmdir(local_path)
+        os.rmdir(path)
 
         if path in self._ensured_directories:
             self._ensured_directories.remove(path)
@@ -115,13 +103,13 @@ class DirTargetManager(TargetManager):
         return f"file://{self.base_path}"
 
     def get_sys_path(self) -> List[str]:
-        return ["/"]
+        return [self.base_path]
 
     def get_sys_implementation(self) -> Dict[str, Any]:
         return {"name": "micropython", "version": (1, 27, 0), "_mpy": None}
 
     def get_default_target(self) -> str:
-        return "/"
+        return self.base_path
 
 
 class DummyTargetManager(DirTargetManager):
