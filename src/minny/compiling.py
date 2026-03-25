@@ -40,9 +40,27 @@ class Compiler:
         os.remove(temp_path)
         return result
 
-    def compile_to_file(self, source_path: str, target_path: str, embedded_source_path: str) -> None:
-        args = self._get_path_with_options() + ["-o", target_path, "-s", embedded_source_path, source_path]
-        subprocess.check_call(args, executable=args[0], stdin=subprocess.DEVNULL)
+    def compile_to_file(
+        self, source_path: str, target_path: str, embedded_source_path: str
+    ) -> None:
+        args = self._get_path_with_options() + [
+            "-o",
+            target_path,
+            "-s",
+            embedded_source_path,
+            source_path,
+        ]
+        result = subprocess.run(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise UserError(f"Compiling {source_path} failed:\n{result.stdout.strip()}\n")
+        elif result.stdout:
+            logger.warning(f"mpy-cross produced output:\n{result.stdout}")
 
     def get_module_format(self) -> str:
         if self._configuration_hash is None:

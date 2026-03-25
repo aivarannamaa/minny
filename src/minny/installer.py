@@ -221,10 +221,8 @@ class Installer(ABC):
             # can't express relative paths across different drives on Windows
             return os.path.abspath(cwd_based_path)
 
-        # if possible, leave relative path relative
-        abs_local_lib_dir = os.path.normpath(
-            os.path.join(self._tmgr.base_path, self.get_target_dir().lstrip("/"))
-        )
+        # leave relative path relative
+        abs_local_lib_dir = self._tmgr.base_path
         abs_project_path = os.path.abspath(cwd_based_path)
         return os.path.relpath(abs_project_path, abs_local_lib_dir)
 

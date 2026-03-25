@@ -135,16 +135,16 @@ class Tracker:
         file_info = None if force else self._tracked_files.get(target_path, None)
         source_crc32 = zlib.crc32(content)
         if file_info is not None and file_info["crc32"] == source_crc32:
-            logger.debug(f"Skip writing '{target_path}' (recorded crc32 not changed)")
+            logger.debug(f"Skip writing to '{target_path}' (recorded crc32 not changed)")
             return
 
-        checked_crc32 = self._tmgr.try_get_crc32(target_path)
-        if checked_crc32 == source_crc32:
-            logger.debug(f"Skip writing '{target_path}' (checked crc32 not changed)")
+        actual_target_crc32 = self._tmgr.try_get_crc32(target_path)
+        if actual_target_crc32 == source_crc32:
+            logger.debug(f"Skip writing to '{target_path}' (actual target crc32 not changed)")
         else:
-            logger.info(
-                f"Writing {len(content)} bytes to '{target_path}' (checked crc32={checked_crc32})"
-            )
+            logger.debug(f"CRC-s don't match: {actual_target_crc32} vs {source_crc32}")
+            logger.info(f"Writing {len(content)} bytes to '{target_path}')")
+            print(f"Writing to {target_path}")
             self._tmgr.ensure_dir_and_write_file(target_path, content)
 
         self._tracked_files[target_path] = _TrackedFileInfo(crc32=source_crc32)

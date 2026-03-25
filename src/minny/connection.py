@@ -80,7 +80,7 @@ class MicroPythonConnection:
         while True:
             self.check_for_error()
 
-            match = re.search(terminator, self._read_buffer)
+            match = re.search(terminator, self._read_buffer)  # type: ignore
             if match:
                 break
 

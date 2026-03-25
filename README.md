@@ -200,3 +200,9 @@ Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
+
+## Related work
+
+* https://codeberg.org/yvo/mpypkg
+* https://github.com/cortexm/mpytool
+* https://belay.readthedocs.io/en/latest/Package%20Manager.html

@@ -3,11 +3,10 @@ import hashlib
 import json
 import os.path
 from logging import getLogger
-from typing import Any, Dict, List, Optional, Tuple, TypedDict
+from typing import Any, Dict, List, Optional, TypedDict
 
 from minny import get_default_minny_cache_dir
 from minny.circup import CircupInstaller
-from minny.common import UserError
 from minny.compiling import Compiler
 from minny.dir_target import DirTargetManager
 from minny.installer import Installer, PackageMetadata
@@ -377,5 +376,3 @@ class ProjectManager:
         )
         project_hash = hashlib.sha256(canonical_project_path.encode("utf-8")).hexdigest()[:20]
         return os.path.join(self._minny_cache_dir, "projects", project_hash + ".json")
-
-

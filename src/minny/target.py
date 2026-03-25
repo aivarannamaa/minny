@@ -487,14 +487,18 @@ class ProperTargetManager(TargetManager, ABC):
                     
                     @builtins.classmethod
                     def try_file_crc32(cls, path):
+                        import builtins
                         try:
                             from binascii import crc32
                             crc = 0
                             with open(path, "rb") as f:
-                                for block in iter(lambda: f.read(1024), b""):
+                                while True:
+                                    block = f.read(1024)
+                                    if not block:
+                                        break
                                     crc = crc32(block, crc)
                             return crc & 0xFFFFFFFF
-                        except:
+                        except builtins.Exception:
                             return None                            
 
                     @builtins.classmethod
