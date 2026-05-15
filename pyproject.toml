@@ -63,6 +63,7 @@ dev = [
     "ty>=0.0.1a19",
     "pyrefly>=0.29.0",
     "types-pyserial",
+    "isort",
     # extras
     "paramiko",
     "ptyprocess"

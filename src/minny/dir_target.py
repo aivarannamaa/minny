@@ -102,6 +102,9 @@ class DirTargetManager(TargetManager):
     def get_device_id(self) -> str:
         return f"file://{self.base_path}"
 
+    def get_minny_folder_path(self) -> str:
+        return os.path.join(self.base_path, ".minny")
+
     def get_sys_path(self) -> List[str]:
         return [self.base_path]
 

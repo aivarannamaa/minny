@@ -1,6 +1,5 @@
 import json
 import os
-import re
 import zlib
 from logging import getLogger
 from typing import Dict, List, NotRequired, Optional, TypedDict
@@ -63,9 +62,27 @@ class Tracker:
             )
 
     def _get_tracking_info_path(self) -> str:
-        device_id = self._tmgr.get_device_id()
-        safe_device_id = re.sub(r"[:/\\]+", "_", device_id)
-        return os.path.join(self._minny_cache_dir, "devices", safe_device_id + ".json")
+        cookie = self._tmgr.get_existing_tracking_cookie()
+
+        if cookie is None or not os.path.isfile(self._get_tracking_info_path_for_cookie(cookie)):
+            if cookie is None:
+                logger.info("Creating new tracking cookie")
+            else:
+                logger.info("Replacing existing tracking cookie written by another Minny")
+            cookie = self._tmgr.create_new_tracking_cookie()
+
+            path = self._get_tracking_info_path_for_cookie(cookie)
+            # Need to match the new cookie with cache so that later we know it's ours
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as fp:
+                fp.write("{}")
+        else:
+            path = self._get_tracking_info_path_for_cookie(cookie)
+
+        return path
+
+    def _get_tracking_info_path_for_cookie(self, cookie: str) -> str:
+        return os.path.join(self._minny_cache_dir, "devices", cookie + ".json")
 
     def remove_file_if_exists(self, path: str) -> None:
         self._tmgr.remove_file_if_exists(path)

@@ -10,6 +10,7 @@ import sys
 import textwrap
 import threading
 import time
+import uuid
 from abc import ABC, abstractmethod
 from logging import getLogger
 from textwrap import dedent
@@ -139,6 +140,26 @@ class TargetManager(ABC):
 
     @abstractmethod
     def get_device_id(self) -> str: ...
+
+    @abstractmethod
+    def get_minny_folder_path(self) -> str: ...
+
+    def _get_tracking_cookie_path(self) -> str:
+        return self.join_path(self.get_minny_folder_path(), "cookie")
+
+    def get_existing_tracking_cookie(self) -> Optional[str]:
+        path = self._get_tracking_cookie_path()
+        if not self.is_file(path):
+            return None
+
+        return self.read_file(path).decode(ENCODING).strip()
+
+    def create_new_tracking_cookie(self) -> str:
+        new_cookie = str(uuid.uuid4())
+        logger.info(f"Generated new cookie: {new_cookie}")
+        path = self._get_tracking_cookie_path()
+        self.ensure_dir_and_write_file(path, new_cookie.encode(ENCODING))
+        return new_cookie
 
     @abstractmethod
     def try_get_stat(self, path: str) -> Optional[os.stat_result]: ...
@@ -423,6 +444,10 @@ class ProperTargetManager(TargetManager, ABC):
     def get_device_id(self) -> str:
         assert self._board_id is not None
         return self._board_id
+
+    def get_minny_folder_path(self) -> str:
+        # TODO:
+        return "/.minny"
 
     def get_sys_path(self) -> List[str]:
         if self._sys_path is None:
