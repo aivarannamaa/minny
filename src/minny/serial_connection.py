@@ -4,7 +4,7 @@ import threading
 import time
 from logging import getLogger
 from textwrap import dedent
-from typing import Any, Optional
+from typing import Any
 
 from .connection import MicroPythonConnection
 
@@ -66,10 +66,10 @@ class SerialConnection(MicroPythonConnection):
 
                 # TODO: check if user already has this group
                 message += "\n\n" + dedent(
-                    """\
+                    f"""\
                 Try adding yourself to the '{group}' group:
                 > sudo usermod -a -G {group} <username>
-                (NB! You may need to reboot your system after this!)""".format(group=group)
+                (NB! You may need to reboot your system after this!)"""
                 )
 
             elif "PermissionError" in message or "Could not exclusively lock" in message:
@@ -83,7 +83,7 @@ class SerialConnection(MicroPythonConnection):
 
             raise ConnectionRefusedError(message) from error
 
-        self._reading_thread: Optional[threading.Thread]
+        self._reading_thread: threading.Thread | None
         if skip_reader:
             self._reading_thread = None
         else:

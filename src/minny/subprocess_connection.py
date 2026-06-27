@@ -1,13 +1,13 @@
 import signal
 import sys
-from typing import List, Optional, cast
+from typing import cast
 
 from .common import INTERNAL_ERROR_STATUS_CODE
 from .connection import MicroPythonConnection
 
 
 class SubprocessConnection(MicroPythonConnection):
-    def __init__(self, executable: str, args: List[str]):
+    def __init__(self, executable: str, args: list[str]):
         import threading
 
         try:
@@ -18,7 +18,7 @@ class SubprocessConnection(MicroPythonConnection):
 
         super().__init__()
         cmd = [executable] + args
-        self._proc: Optional[ptyprocess.PtyProcess] = ptyprocess.PtyProcessUnicode.spawn(
+        self._proc: ptyprocess.PtyProcess | None = ptyprocess.PtyProcessUnicode.spawn(
             cmd, echo=False
         )
         # print(dir(self._proc))
@@ -27,7 +27,7 @@ class SubprocessConnection(MicroPythonConnection):
 
         # self._stdout = self._proc.stdout
 
-        self._reading_thread: Optional[threading.Thread] = threading.Thread(
+        self._reading_thread: threading.Thread | None = threading.Thread(
             target=self._listen_output, daemon=True
         )
 

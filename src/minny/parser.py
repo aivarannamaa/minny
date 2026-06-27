@@ -1,11 +1,11 @@
 import argparse
 import sys
-from typing import Any, List, Optional
+from typing import Any
 
 from minny import __version__
 
 
-def _process_remainder_args(args: Any, reminder: List[str]) -> List[str]:
+def _process_remainder_args(args: Any, reminder: list[str]) -> list[str]:
     # returns list of bad args
     if getattr(args, "command", None) != "install":
         # all remaining args are bad unless command is install
@@ -56,7 +56,7 @@ def _add_connection_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def parse_arguments(raw_args: Optional[List[str]] = None) -> Any:
+def parse_arguments(raw_args: list[str] | None = None) -> Any:
     if raw_args is None:
         raw_args = sys.argv[1:]
 

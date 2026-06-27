@@ -2,8 +2,9 @@ import os.path
 import tempfile
 import threading
 import zlib
+from collections.abc import Callable
 from logging import getLogger
-from typing import Any, BinaryIO, Callable, Dict, List, Optional
+from typing import Any, BinaryIO
 
 from minny.target import TargetManager, UserError
 
@@ -24,13 +25,13 @@ class DirTargetManager(TargetManager):
     def get_dir_sep(self) -> str:
         return os.path.sep
 
-    def try_get_stat(self, path: str) -> Optional[os.stat_result]:
+    def try_get_stat(self, path: str) -> os.stat_result | None:
         try:
             return os.stat(path)
         except OSError:
             return None
 
-    def try_get_crc32(self, path: str) -> Optional[int]:
+    def try_get_crc32(self, path: str) -> int | None:
         if not os.path.isfile(path):
             return None
 
@@ -90,7 +91,7 @@ class DirTargetManager(TargetManager):
             assert not os.path.exists(path)
             os.mkdir(path, 0o755)
 
-    def listdir(self, path: str) -> List[str]:
+    def listdir(self, path: str) -> list[str]:
         return os.listdir(path)
 
     def rmdir(self, path: str) -> None:
@@ -105,10 +106,10 @@ class DirTargetManager(TargetManager):
     def get_minny_folder_path(self) -> str:
         return os.path.join(self.base_path, ".minny")
 
-    def get_sys_path(self) -> List[str]:
+    def get_sys_path(self) -> list[str]:
         return [self.base_path]
 
-    def get_sys_implementation(self) -> Dict[str, Any]:
+    def get_sys_implementation(self) -> dict[str, Any]:
         return {"name": "micropython", "version": (1, 27, 0), "_mpy": None}
 
     def get_default_target(self) -> str:

@@ -3,7 +3,7 @@ import hashlib
 import json
 import os.path
 from logging import getLogger
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, TypedDict
 
 from minny import get_default_minny_cache_dir
 from minny.circup import CircupInstaller
@@ -21,14 +21,14 @@ logger = getLogger(__name__)
 
 
 class _InstallerSyncState(TypedDict):
-    specs: List[str]
-    metas: Dict[str, PackageMetadata]
+    specs: list[str]
+    metas: dict[str, PackageMetadata]
 
 
 class _CachedProjectInfo(TypedDict):
     project_path: str
     lib_dir: str
-    last_sync_states: Dict[str, _InstallerSyncState]
+    last_sync_states: dict[str, _InstallerSyncState]
 
 
 class ProjectManager:
@@ -38,7 +38,7 @@ class ProjectManager:
         tmgr: TargetManager,
         tracker: Tracker,
         compiler: Compiler,
-        minny_cache_dir: Optional[str] = None,
+        minny_cache_dir: str | None = None,
     ):
         self._project_dir = project_dir
         self._lib_dir = os.path.join(self._project_dir, ".minny", "lib")
@@ -49,7 +49,7 @@ class ProjectManager:
         self._dummy_tracker = DummyTracker(self._lib_dir_mgr)
         self._compiler = compiler
         self._pyproject_toml_path = os.path.join(self._project_dir, "pyproject.toml")
-        self._pyproject_toml: Optional[Dict[str, Any]] = (
+        self._pyproject_toml: dict[str, Any] | None = (
             parse_toml_file(self._pyproject_toml_path)
             if os.path.isfile(self._pyproject_toml_path)
             else None
@@ -57,7 +57,7 @@ class ProjectManager:
         self._minny_settings = load_minny_settings_from_pyproject_toml(self._pyproject_toml or {})
 
         self._package_json_path = os.path.join(self._project_dir, "package.json")
-        self._package_json: Optional[Dict[str, Any]] = (
+        self._package_json: dict[str, Any] | None = (
             parse_json_file(self._package_json_path)
             if os.path.isfile(self._package_json_path)
             else None
@@ -68,14 +68,14 @@ class ProjectManager:
         print("syncing")
         self._sync_dependencies()
 
-    def deploy(self, mpy_cross_path: Optional[str] = None, except_main: bool = False, **kwargs):
+    def deploy(self, mpy_cross_path: str | None = None, except_main: bool = False, **kwargs):
         self._deploy(mpy_cross_path, except_main=except_main)
 
-    def run(self, script_path: str, mpy_cross_path: Optional[str], **kwargs):
+    def run(self, script_path: str, mpy_cross_path: str | None, **kwargs):
         self._deploy(mpy_cross_path, except_main=True)
         # TODO: self._tmgr.exec()
 
-    def _deploy(self, mpy_cross_path: Optional[str], except_main: bool):
+    def _deploy(self, mpy_cross_path: str | None, except_main: bool):
         compiler = Compiler(self._tmgr, mpy_cross_path, self._minny_cache_dir)
         self._sync_dependencies()
         self._deploy_packages(compiler)
@@ -87,7 +87,7 @@ class ProjectManager:
         current_package_installer_name = self._get_current_package_installer_type()
 
         last_sync_states = self._load_last_sync_states()
-        new_sync_states: Dict[str, _InstallerSyncState] = {}
+        new_sync_states: dict[str, _InstallerSyncState] = {}
         all_relevant_files = []
 
         for installer_name in ["pip", "mip", "circup"]:
@@ -119,8 +119,8 @@ class ProjectManager:
     def _sync_installer_dependencies(
         self,
         installer_name: str,
-        espec_strings: List[str],
-        last_sync_state: Optional[_InstallerSyncState],
+        espec_strings: list[str],
+        last_sync_state: _InstallerSyncState | None,
     ) -> _InstallerSyncState:
         installer = self._create_installer(installer_name, self._lib_dir_mgr, self._dummy_tracker)
         especs = [installer.parse_extended_spec(s) for s in espec_strings]
@@ -170,13 +170,13 @@ class ProjectManager:
 
     def filter_required_packages(
         self,
-        metas: Dict[str, PackageMetadata],
-        espec_strings: List[str],
+        metas: dict[str, PackageMetadata],
+        espec_strings: list[str],
         installer: Installer,
-    ) -> Dict[str, PackageMetadata]:
+    ) -> dict[str, PackageMetadata]:
         result = {}
 
-        def collect_required_metas(_especs: List[str]) -> None:
+        def collect_required_metas(_especs: list[str]) -> None:
             for espec_str in _especs:
                 espec = installer.parse_extended_spec(espec_str)
                 if espec.name is not None:
@@ -204,7 +204,7 @@ class ProjectManager:
 
         return result
 
-    def _clean_up_local_lib(self, all_relevant_files: List[str]) -> None:
+    def _clean_up_local_lib(self, all_relevant_files: list[str]) -> None:
         # Remove orphaned files not part of any package
         abs_norm_local_paths_to_keep = [
             os.path.normpath(
@@ -262,11 +262,11 @@ class ProjectManager:
 
     def _filter_package_names(
         self,
-        canonical_package_names: List[str],
-        include_patterns: List[str],
-        exclude_patterns: List[str],
-        auto_include_exclusions: Optional[List[str]] = None,
-    ) -> List[str]:
+        canonical_package_names: list[str],
+        include_patterns: list[str],
+        exclude_patterns: list[str],
+        auto_include_exclusions: list[str] | None = None,
+    ) -> list[str]:
         auto_include_exclusions = auto_include_exclusions or []
         # TODO: normalise patterns according to installer rules
         # TODO: make sure current package gets handled properly
@@ -327,7 +327,7 @@ class ProjectManager:
         installer_type: str,
         tmgr: TargetManager,
         tracker: Tracker,
-        target_dir: Optional[str] = None,
+        target_dir: str | None = None,
     ) -> Installer:
         """Create an installer instance of the specified type for the given target."""
         match installer_type:
@@ -340,7 +340,7 @@ class ProjectManager:
             case _:
                 raise ValueError(f"Unknown installer type: {installer_type}")
 
-    def _load_last_sync_states(self) -> Dict[str, _InstallerSyncState]:
+    def _load_last_sync_states(self) -> dict[str, _InstallerSyncState]:
         path = self._get_project_cache_path()
         if os.path.exists(path):
             assert os.path.isfile(path), f"{path} is not a file"
@@ -357,7 +357,7 @@ class ProjectManager:
             logger.debug("Last sync info not found")
             return {}
 
-    def _save_last_sync_states(self, last_sync_states: Dict[str, _InstallerSyncState]) -> None:
+    def _save_last_sync_states(self, last_sync_states: dict[str, _InstallerSyncState]) -> None:
         path = self._get_project_cache_path()
         logger.debug(f"Saving project info to '{path}'")
         info = _CachedProjectInfo(

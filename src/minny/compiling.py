@@ -1,5 +1,6 @@
 import json
 import os.path
+import pathlib
 import platform
 import stat
 import subprocess
@@ -9,7 +10,7 @@ import urllib.request
 import uuid
 import zlib
 from logging import getLogger
-from typing import Any, Dict, List, Optional
+from typing import Any
 from urllib.request import urlopen
 
 from minny import get_default_minny_cache_dir
@@ -23,19 +24,18 @@ class Compiler:
     def __init__(
         self,
         tmgr: TargetManager,
-        mpy_cross_path: Optional[str] = None,
-        minny_cache_dir: Optional[str] = None,
+        mpy_cross_path: str | None = None,
+        minny_cache_dir: str | None = None,
     ):
         self._tmgr = tmgr
         self._minny_cache_dir: str = minny_cache_dir or get_default_minny_cache_dir()
         self._user_mpy_cross_path = mpy_cross_path
-        self._configuration_hash: Optional[str] = None
+        self._configuration_hash: str | None = None
 
     def compile_to_bytes(self, source_path: str, embedded_source_path: str) -> bytes:
         temp_path = os.path.join(tempfile.gettempdir(), str(uuid.uuid4()))
         self.compile_to_file(source_path, temp_path, embedded_source_path)
-        with open(temp_path, "rb") as fp:
-            result = fp.read()
+        result = pathlib.Path(temp_path).read_bytes()
 
         os.remove(temp_path)
         return result
@@ -68,7 +68,7 @@ class Compiler:
 
         return self._configuration_hash
 
-    def _get_path_with_options(self) -> List[str]:
+    def _get_path_with_options(self) -> list[str]:
         sys_implementation = self._tmgr.get_sys_implementation()
         version_prefix = ".".join(map(str, sys_implementation["version"][:2]))
 
@@ -136,7 +136,7 @@ class Compiler:
         urllib.request.urlretrieve(download_url, target_path)
         os.chmod(target_path, os.stat(target_path).st_mode | stat.S_IEXEC)
 
-    def _get_mpy_cross_options(self, sys_implementation: Dict[str, Any]) -> List[str]:
+    def _get_mpy_cross_options(self, sys_implementation: dict[str, Any]) -> list[str]:
         result = []
 
         sys_mpy = sys_implementation["_mpy"]

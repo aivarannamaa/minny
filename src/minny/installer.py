@@ -1,3 +1,4 @@
+import builtins
 import dataclasses
 import fnmatch
 import hashlib
@@ -8,7 +9,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from logging import getLogger
 from pathlib import Path
-from typing import Dict, List, NotRequired, Optional, TypedDict
+from typing import NotRequired, TypedDict
 
 from packaging.version import InvalidVersion, Version
 
@@ -34,8 +35,8 @@ class ExtendedSpec:
     """
 
     editable: bool
-    name: Optional[str]
-    location: Optional[str]
+    name: str | None
+    location: str | None
     plain_spec: str
     extended_spec: str
 
@@ -50,7 +51,7 @@ class ExtendedSpec:
 class EditableInfo(TypedDict):
     project_path: str  # absolute or relative to lib dir
     project_fingerprint: str
-    files: Dict[
+    files: dict[
         str, str
     ]  # destination path relative to /lib => source path relative to project_path
 
@@ -60,9 +61,9 @@ class PackageMetadata(TypedDict):
     version: str
     summary: NotRequired[str]
     license: NotRequired[str]
-    dependencies: NotRequired[List[str]]
-    project_urls: NotRequired[Dict[str, str]]
-    files: List[str]
+    dependencies: NotRequired[list[str]]
+    project_urls: NotRequired[dict[str, str]]
+    files: list[str]
     requirement: NotRequired[str]
     editable: NotRequired[EditableInfo]
 
@@ -87,13 +88,13 @@ class Installer(ABC):
         self,
         tmgr: TargetManager,
         tracker: Tracker,
-        target_dir: Optional[str],
-        minny_cache_dir: Optional[str] = None,
+        target_dir: str | None,
+        minny_cache_dir: str | None = None,
     ):
         self._tmgr = tmgr
         self._tracker = tracker
         self._minny_cache_dir = minny_cache_dir or get_default_minny_cache_dir()
-        self._custom_target_dir: Optional[str] = target_dir
+        self._custom_target_dir: str | None = target_dir
         self._quiet = False
         self._tty = False
 
@@ -106,7 +107,7 @@ class Installer(ABC):
     @abstractmethod
     def get_installer_name(self) -> str: ...
 
-    def install_for_project(self, extended_specs: List[str], project_path: str) -> None:
+    def install_for_project(self, extended_specs: list[str], project_path: str) -> None:
         # Local deps may be given with relative paths, and these are relative to project_path.
         # Installer, on the other hand, uses cwd as anchor.
         old_wd = os.getcwd()
@@ -119,17 +120,17 @@ class Installer(ABC):
     @abstractmethod
     def install(
         self,
-        extended_specs: List[str],
+        extended_specs: list[str],
         no_deps: bool = False,
         compile: bool = True,
-        mpy_cross: Optional[str] = None,
+        mpy_cross: str | None = None,
         **kwargs,
     ) -> None: ...
 
     def uninstall(
         self,
-        packages: Optional[List[str]] = None,
-        requirement_files: Optional[List[str]] = None,
+        packages: list[str] | None = None,
+        requirement_files: list[str] | None = None,
         **kwargs,
     ):
         packages = packages or []
@@ -155,7 +156,7 @@ class Installer(ABC):
         for spec in all_specs:
             self._uninstall_package(spec)
 
-    def validate_specs(self, extended_specs: List[str]) -> None:
+    def validate_specs(self, extended_specs: list[str]) -> None:
         for spec in extended_specs:
             parsed_spec = self.parse_extended_spec(spec)
             if parsed_spec.editable and not self.supports_editable_installs():
@@ -238,7 +239,7 @@ class Installer(ABC):
     def compile_package_metadata(self, meta: PackageMetadata) -> bytes:
         return json.dumps(meta, sort_keys=True).encode(META_ENCODING)
 
-    def get_installed_package_infos(self) -> Dict[str, PackageInstallationInfo]:
+    def get_installed_package_infos(self) -> dict[str, PackageInstallationInfo]:
         rel_meta_dir = f".{self.get_installer_name()}"
         abs_meta_dir = self._tmgr.join_path(self.get_target_dir(), rel_meta_dir)
 
@@ -258,23 +259,23 @@ class Installer(ABC):
 
         return result
 
-    def get_installed_package_metas(self) -> Dict[str, PackageMetadata]:
+    def get_installed_package_metas(self) -> dict[str, PackageMetadata]:
         result = {}
         for name, info in self.get_installed_package_infos().items():
             result[name] = self.load_package_metadata(info)
         return result
 
-    def get_installed_package_names(self) -> List[str]:
+    def get_installed_package_names(self) -> builtins.list[str]:
         return list(self.get_installed_package_infos().keys())
 
-    def get_installed_package_info(self, name: str) -> Optional[PackageInstallationInfo]:
+    def get_installed_package_info(self, name: str) -> PackageInstallationInfo | None:
         canonical_name = self.canonicalize_package_name(name)
         return self.get_installed_package_infos().get(canonical_name)
 
     @abstractmethod
-    def get_package_latest_version(self, name: str) -> Optional[str]: ...
+    def get_package_latest_version(self, name: str) -> str | None: ...
 
-    def parse_meta_file_path(self, meta_file_path: str) -> Optional[PackageInstallationInfo]:
+    def parse_meta_file_path(self, meta_file_path: str) -> PackageInstallationInfo | None:
         logger.debug(f"Parsing meta file path {meta_file_path}")
         _, meta_file_name = self._tmgr.split_dir_and_basename(meta_file_path)
         assert meta_file_name is not None
@@ -474,7 +475,7 @@ class Installer(ABC):
         source_package_meta: PackageMetadata,
         compile: bool,
         compiler: Compiler,
-    ) -> List[str]:
+    ) -> builtins.list[str]:
         canonical_name = source_package_info.name
         logger.debug(f"check-deploying package '{canonical_name}'")
 
@@ -483,7 +484,7 @@ class Installer(ABC):
         # An alternative would be uninstalling the old version first if the version changes, but:
         # * this can be less efficient (unchanged modules get deleted in vain)
         # * this would not help with editable packages, which may gain or lose files without changing the version
-        previous_installation_files: List[str] = []
+        previous_installation_files: list[str] = []
 
         # Usually this method gets called when a version of the package is already installed and tracked.
         # This is the case we need to optimize, so we rely on the tracker, not the filesystem.
@@ -532,14 +533,14 @@ class Installer(ABC):
         canonical_name: str,
         compile: bool,
         compiler: Compiler,
-    ) -> List[str]:
+    ) -> builtins.list[str]:
         logger.info(f"Start deploying package {source_package_info}")
         target_metadata = deepcopy(source_package_meta)
         target_metadata["files"] = []
 
-        upload_map: Dict[str, str] = {}  # rel destination => rel source (from source_dir)
+        upload_map: dict[str, str] = {}  # rel destination => rel source (from source_dir)
 
-        editable_info: Optional[EditableInfo] = source_package_meta.get("editable", None)
+        editable_info: EditableInfo | None = source_package_meta.get("editable", None)
         if editable_info is not None:
             del target_metadata["editable"]
 
@@ -591,12 +592,12 @@ class Installer(ABC):
 
         return target_metadata["files"]
 
-    def get_normalized_no_deploy_packages(self) -> List[str]:
+    def get_normalized_no_deploy_packages(self) -> builtins.list[str]:
         return []
 
     def locate_target_file_in_project(
         self, rel_target_path: str, abs_project_path: str
-    ) -> Optional[str]:
+    ) -> str | None:
         for root in [os.path.join(abs_project_path, "src"), abs_project_path]:
             candidate_path = os.path.normpath(os.path.join(root, rel_target_path))
             if os.path.isfile(candidate_path):

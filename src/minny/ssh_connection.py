@@ -1,5 +1,4 @@
 import shlex
-from typing import Optional
 
 from minny.connection import MicroPythonConnection
 
@@ -23,7 +22,7 @@ class SshProcessConnection(MicroPythonConnection):
         # stderr gets directed to stdout because of pty
         self._pid = self._stdout.readline().strip()
 
-        self._reading_thread: Optional[threading.Thread] = threading.Thread(
+        self._reading_thread: threading.Thread | None = threading.Thread(
             target=self._listen_output, daemon=True
         )
         self._reading_thread.start()

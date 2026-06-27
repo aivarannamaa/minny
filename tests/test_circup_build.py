@@ -8,7 +8,6 @@ import traceback
 import urllib.request
 import zipfile
 from logging import getLogger
-from typing import List
 
 import pytest
 
@@ -142,9 +141,11 @@ def download_latest_py_bundle(github_name: str) -> str:
     py_bundle_url = f"{bundle_repo_url}/releases/download/{latest_tag}/{py_bundle_base_name}.zip"
     print("Downloading", py_bundle_url)
     bundle_container = tempfile.mkdtemp()
-    with urllib.request.urlopen(py_bundle_url) as response:
-        with zipfile.ZipFile(io.BytesIO(response.read())) as zip_ref:
-            zip_ref.extractall(bundle_container)
+    with (
+        urllib.request.urlopen(py_bundle_url) as response,
+        zipfile.ZipFile(io.BytesIO(response.read())) as zip_ref,
+    ):
+        zip_ref.extractall(bundle_container)
 
     return os.path.join(bundle_container, py_bundle_base_name)
 
@@ -153,9 +154,9 @@ def folders_are_equal(
     title: str,
     left: str,
     right: str,
-    accepted_left_only: List[str],
-    accepted_right_only: List[str],
-    accepted_diff_files: List[str],
+    accepted_left_only: list[str],
+    accepted_right_only: list[str],
+    accepted_diff_files: list[str],
 ) -> bool:
     def compare_dirs(a, b, context=None):
         def add_context(items):

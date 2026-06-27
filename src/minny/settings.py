@@ -1,7 +1,8 @@
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from logging import getLogger
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
 
 from minny.common import UserError
 
@@ -10,35 +11,35 @@ logger = getLogger(__name__)
 
 @dataclass
 class DependenciesTable:
-    pip: List[str]
-    mip: List[str]
-    circup: List[str]
+    pip: list[str]
+    mip: list[str]
+    circup: list[str]
 
 
 @dataclass
 class DeployFilesItem:
     source: str
     destination: str
-    include: List[str]
-    exclude: List[str]
-    compile: List[str]
-    no_compile: List[str]
+    include: list[str]
+    exclude: list[str]
+    compile: list[str]
+    no_compile: list[str]
 
 
 @dataclass
 class DeployPackagesItem:
     destination: str
-    include: List[str]
-    exclude: List[str]
-    compile: List[str]
-    no_compile: List[str]
+    include: list[str]
+    exclude: list[str]
+    compile: list[str]
+    no_compile: list[str]
 
 
 @dataclass
 class DeployTable:
     current_package_installer: str
-    files: List[DeployFilesItem]
-    packages: List[DeployPackagesItem]
+    files: list[DeployFilesItem]
+    packages: list[DeployPackagesItem]
 
 
 @dataclass
@@ -162,8 +163,8 @@ class SettingsReader:
         )
 
     def read_table(
-        self, context: Any, path: str, default: Any, allowed_keys: List[str], context_path: str
-    ) -> Dict[str, Any]:
+        self, context: Any, path: str, default: Any, allowed_keys: list[str], context_path: str
+    ) -> dict[str, Any]:
         obj = self.read_setting(context, path, default, context_path)
         obj_abs_path = self._join_paths(context_path, path)
         if obj == default:
@@ -190,20 +191,20 @@ class SettingsReader:
         default: Any,
         item_mapper: Callable[[Any, str, str], Any],
         context_path: str,
-    ) -> List[Any]:
+    ) -> list[Any]:
         arr = self.read_array(context, path, default, context_path=context_path)
         arr_abs_path = self._join_paths(context_path, path)
         result = [item_mapper(arr, f"[{i}]", arr_abs_path) for i in range(len(arr))]
         return result
 
     def read_string_array(
-        self, context: Any, path: str, default: List, context_path: str
-    ) -> List[str]:
+        self, context: Any, path: str, default: list, context_path: str
+    ) -> list[str]:
         return self.read_mapped_array(
             context, path, default, self.read_string_no_default, context_path=context_path
         )
 
-    def read_array(self, context: Any, path: str, default: List, context_path: str) -> List[Any]:
+    def read_array(self, context: Any, path: str, default: list, context_path: str) -> list[Any]:
         obj = self.read_setting(context, path, default, context_path)
         obj_abs_path = self._join_paths(context_path, path)
         if obj == default:
@@ -217,9 +218,7 @@ class SettingsReader:
     def read_string_no_default(self, context: Any, path: str, context_path: str) -> str:
         return self.read_string(context, path, None, context_path)
 
-    def read_string(
-        self, context: Any, path: str, default: Optional[str], context_path: str
-    ) -> str:
+    def read_string(self, context: Any, path: str, default: str | None, context_path: str) -> str:
         obj = self.read_setting(context, path, default, context_path)
         obj_abs_path = self._join_paths(context_path, path)
         if obj is None:
@@ -234,7 +233,7 @@ class SettingsReader:
         return obj
 
     def read_setting(
-        self, context: Dict[str, Any] | List[Any], path: str, default: Any, context_path: str
+        self, context: dict[str, Any] | list[Any], path: str, default: Any, context_path: str
     ) -> Any:
         sections = path.split(".")
         section_pattern = re.compile(r"^([A-Za-z-]+)?(?:\[(\d+)])?$")
@@ -278,7 +277,7 @@ class SettingsReader:
             return context_path + "." + path
 
     def read_current_package_installer(
-        self, context: Dict[str, Any], path: str, context_path: str
+        self, context: dict[str, Any], path: str, context_path: str
     ) -> str:
         result = self.read_string(context, path, "auto", context_path)
         allowed_values = ["pip", "circup", "mip", "none", "auto"]
@@ -289,15 +288,15 @@ class SettingsReader:
         return result
 
 
-def load_minny_settings_from_pyproject_toml(pyproject_toml: Dict[str, Any]) -> MinnySettings:
+def load_minny_settings_from_pyproject_toml(pyproject_toml: dict[str, Any]) -> MinnySettings:
     return load_minny_settings(pyproject_toml, "tool.minny", context_path="")
 
 
-def load_minny_settings(context: Dict[str, Any], path: str, context_path: str) -> MinnySettings:
+def load_minny_settings(context: dict[str, Any], path: str, context_path: str) -> MinnySettings:
     reader = SettingsReader()
     return reader.read_minny_settings(context, path, context_path=context_path)
 
 
-def read_setting(context: Dict[str, Any], path: str, default: Any, context_path: str) -> Any:
+def read_setting(context: dict[str, Any], path: str, default: Any, context_path: str) -> Any:
     reader = SettingsReader()
     return reader.read_setting(context, path, default, context_path)

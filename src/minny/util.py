@@ -1,14 +1,16 @@
 import json
 import os.path
 import re
+import string
 import subprocess
 import sys
 import tomllib
 import urllib.error
 import urllib.request
+from collections.abc import Sequence
 from logging import getLogger
 from pathlib import Path
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Any
 
 import packaging.version
 from packaging.utils import canonicalize_name
@@ -96,7 +98,7 @@ def get_venv_site_packages_path(venv_path: str) -> str:
             )
 
 
-def parse_dist_info_dir_name(name: str) -> Tuple[str, str]:
+def parse_dist_info_dir_name(name: str) -> tuple[str, str]:
     assert name.endswith(".dist-info")
     name, version = name[: -len(".dist-info")].split("-")
     return canonicalize_name(name), version
@@ -115,7 +117,7 @@ def custom_normalize_dist_name(name: str) -> str:
     return normalize_name(name).lower().replace("-", "_")
 
 
-def list_volumes() -> List[str]:
+def list_volumes() -> list[str]:
     skip_letters = {"A"}  # can be slow to query
 
     "Adapted from https://github.com/ntoll/uflash/blob/master/uflash.py"
@@ -131,10 +133,10 @@ def list_volumes() -> List[str]:
         old_mode = ctypes.windll.kernel32.SetErrorMode(1)  # @UndefinedVariable
         try:
             volumes = []
-            for disk in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+            for disk in string.ascii_uppercase:
                 if disk in skip_letters:
                     continue
-                path = "{}:\\".format(disk)
+                path = f"{disk}:\\"
                 if os.path.exists(path):
                     volumes.append(path)
 
@@ -247,7 +249,7 @@ def parse_toml_bytes(content: bytes, encoding="utf-8"):
     return tomllib.loads(content.decode(encoding))
 
 
-def find_enclosing_project() -> Optional[str]:
+def find_enclosing_project() -> str | None:
     dir_path = os.getcwd()
 
     while dir_path and dir_path[-1] not in ["/", "\\", ":"]:
@@ -260,7 +262,7 @@ def find_enclosing_project() -> Optional[str]:
     return None
 
 
-def read_requirements_from_txt_file(path: str) -> List[str]:
+def read_requirements_from_txt_file(path: str) -> list[str]:
     result = []
     with open(path, encoding="utf-8", errors="replace") as fp:
         for line in fp:

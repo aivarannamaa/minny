@@ -9,7 +9,6 @@ import tempfile
 import uuid
 from logging import getLogger
 from pathlib import Path
-from typing import Dict, List, Optional
 
 from packaging.utils import canonicalize_name, canonicalize_version
 
@@ -53,17 +52,17 @@ class PipInstaller(Installer):
 
     def install(
         self,
-        extended_specs: List[str],
+        extended_specs: list[str],
         no_deps: bool = False,
         compile: bool = True,
-        mpy_cross: Optional[str] = None,
-        requirement_files: Optional[List[str]] = None,
-        constraint_files: Optional[List[str]] = None,
+        mpy_cross: str | None = None,
+        requirement_files: list[str] | None = None,
+        constraint_files: list[str] | None = None,
         pre: bool = False,
-        index: Optional[str] = None,
-        default_index: Optional[str] = None,
+        index: str | None = None,
+        default_index: str | None = None,
         no_index: bool = False,
-        find_links: Optional[str] = None,
+        find_links: str | None = None,
         upgrade: bool = False,
         force_reinstall: bool = False,
         **_,
@@ -144,9 +143,9 @@ class PipInstaller(Installer):
 
     def _format_selection_args(
         self,
-        specs: List[str],
-        requirement_files: Optional[List[str]],
-        constraint_files: Optional[List[str]],
+        specs: list[str],
+        requirement_files: list[str] | None,
+        constraint_files: list[str] | None,
         pre: bool,
         no_deps: bool,
     ):
@@ -166,7 +165,7 @@ class PipInstaller(Installer):
 
         return args
 
-    def get_package_latest_version(self, name: str) -> Optional[str]:
+    def get_package_latest_version(self, name: str) -> str | None:
         # TODO:
         return None
 
@@ -176,7 +175,7 @@ class PipInstaller(Installer):
         dist_info_dir_name: str,
         compile: bool,
         compiler: Compiler,
-        all_requested_specs: List[ExtendedSpec],
+        all_requested_specs: list[ExtendedSpec],
     ) -> None:
         canonical_name, version = parse_dist_info_dir_name(dist_info_dir_name)
         self._report_progress(f"Copying {canonical_name} {version}")
@@ -194,7 +193,7 @@ class PipInstaller(Installer):
             venv_site_packages_dir, dist_info_dir_name
         )
         meta["files"] = []
-        editable_files: Dict[str, str] = {}
+        editable_files: dict[str, str] = {}
 
         for site_packages_rel_path in rel_paths:
             if espec is not None and espec.editable:
@@ -272,8 +271,9 @@ class PipInstaller(Installer):
 
         # Dummy RECORD
         with open(os.path.join(dist_info_path, "RECORD"), "w", encoding=META_ENCODING) as record_fp:
-            for name in ["METADATA", "INSTALLER", "RECORD"]:
-                record_fp.write(f"{dist_info_dir_name}/{name},,\n")
+            record_fp.writelines(
+                f"{dist_info_dir_name}/{name},,\n" for name in ["METADATA", "INSTALLER", "RECORD"]
+            )
 
     def _is_management_item(self, name: str) -> bool:
         return (
@@ -283,7 +283,7 @@ class PipInstaller(Installer):
             and name.split("-")[0] in MANAGEMENT_DISTS
         )
 
-    def _get_venv_state(self, venv_dir: str) -> Dict[str, float]:
+    def _get_venv_state(self, venv_dir: str) -> dict[str, float]:
         """Returns mapping from dist_info_dir names to modification timestamps of METADATA files"""
         site_packages_dir = get_venv_site_packages_path(venv_dir)
         result = {}
@@ -301,11 +301,11 @@ class PipInstaller(Installer):
     def _invoke_pip_with_index_args(
         self,
         venv_dir: str,
-        pip_args: List[str],
-        index: Optional[str],
-        default_index: Optional[str],
+        pip_args: list[str],
+        index: str | None,
+        default_index: str | None,
         no_index: bool,
-        find_links: Optional[str],
+        find_links: str | None,
     ):
         index_args = []
         if index:
@@ -319,7 +319,7 @@ class PipInstaller(Installer):
 
         self._invoke_pip(venv_dir, pip_args + index_args)
 
-    def _invoke_pip(self, venv_dir: str, args: List[str]) -> None:
+    def _invoke_pip(self, venv_dir: str, args: list[str]) -> None:
         pip_cmd = ["uv", "pip", "--quiet"]
 
         if not self._tty:
@@ -338,7 +338,7 @@ class PipInstaller(Installer):
             sys.stdout.flush()
 
     def remove_dist(
-        self, dist_name: str, target: Optional[str] = None, above_target: bool = False
+        self, dist_name: str, target: str | None = None, above_target: bool = False
     ) -> None:
         could_remove = False
         if target:
@@ -365,7 +365,7 @@ class PipInstaller(Installer):
         if not could_remove:
             logger.warning("Could not find %r for removing", dist_name)
 
-    def list_dist_info_dir_names(self, path: str, dist_name: Optional[str] = None) -> List[str]:
+    def list_dist_info_dir_names(self, path: str, dist_name: str | None = None) -> list[str]:
         names = self._tmgr.listdir(path)
         if dist_name is not None:
             dist_name_in_dist_info_dir = canonicalize_name(dist_name).replace("-", "_")
@@ -414,7 +414,7 @@ class PipInstaller(Installer):
     def get_installer_name(self) -> str:
         return "pip"
 
-    def get_normalized_no_deploy_packages(self) -> List[str]:
+    def get_normalized_no_deploy_packages(self) -> list[str]:
         return [
             "adafruit-blinka",
             "adafruit-blinka-bleio",
@@ -446,7 +446,7 @@ class PipInstaller(Installer):
         if summary is not None:
             meta["summary"] = summary
 
-        project_urls: Dict[str, str] = {}
+        project_urls: dict[str, str] = {}
         for value in msg.get_all("Project-URL", []):
             # Expected form: "Label, https://example.com"
             parts = [p.strip() for p in value.split(",", 1)]
@@ -481,8 +481,8 @@ class PipInstaller(Installer):
         self,
         site_packages_dir: str,
         dist_info_dir_name: str,
-        all_requested_specs: List[ExtendedSpec],
-    ) -> Optional[ExtendedSpec]:
+        all_requested_specs: list[ExtendedSpec],
+    ) -> ExtendedSpec | None:
         # main challenge: the spec may have been given by path, not name
 
         direct_url_file_path = os.path.join(
@@ -520,7 +520,7 @@ class PipInstaller(Installer):
 
 def read_package_file_paths_from_dist_info_dir(
     site_packages_dir: str, dist_info_dir_name: str
-) -> List[str]:
+) -> list[str]:
     result = []
     dist_info_dir_path = os.path.join(site_packages_dir, dist_info_dir_name)
     record_path = os.path.join(dist_info_dir_path, "RECORD")
@@ -542,7 +542,7 @@ def read_package_file_paths_from_dist_info_dir(
     return result
 
 
-def find_dist_info_dir(site_packages_dir: str, dist_name: str) -> Optional[str]:
+def find_dist_info_dir(site_packages_dir: str, dist_name: str) -> str | None:
     logger.debug(f"Finding {dist_name} from {site_packages_dir}")
     for item_name in os.listdir(site_packages_dir):
         if item_name.endswith(".dist-info"):

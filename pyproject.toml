@@ -40,6 +40,15 @@ line-length = 100
 # Exclude a variety of commonly ignored directories.
 exclude = [".venv", ".git", "dist", "docs", "misc", "out", "tests/data"]
 
+[tool.ruff.lint]
+extend-select = ["FURB"]
+ignore = [
+    "SIM103",
+    "BLE001",
+    "FURB171",
+    "UP031", # TODO
+]
+
 [tool.ty.src]
 include = ["src", "tests"]
 exclude = ["tests/data"]

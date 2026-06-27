@@ -3,7 +3,6 @@ import re
 import time
 from logging import getLogger
 from queue import Queue
-from typing import Optional, Union
 
 logger = getLogger(__name__)
 
@@ -25,7 +24,7 @@ class MicroPythonConnection:
         self.num_bytes_received = 0
         self.startup_time = time.time()
         self.text_mode = True
-        self._error: Optional[str] = None
+        self._error: str | None = None
         self._reader_stopped = False
 
     def soft_read(self, size: int, timeout: float = 1) -> bytes:
@@ -66,7 +65,7 @@ class MicroPythonConnection:
 
     def read_until(
         self,
-        terminator: Union[bytes, re.Pattern],
+        terminator: bytes | re.Pattern,
         timeout: float = 1000000,
         timeout_is_soft: bool = False,
     ) -> bytes:

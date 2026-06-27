@@ -1,7 +1,6 @@
 import os.path
 import urllib.parse
 from logging import getLogger
-from typing import Dict, List, Optional
 
 from minny.common import UserError
 from minny.installer import ExtendedSpec, Installer, looks_like_local_dir
@@ -18,7 +17,7 @@ class MipInstaller(Installer):
         else:
             return "0"
 
-    def compute_files_mapping(self, project_path: str, target_files: List[str]) -> Dict[str, str]:
+    def compute_files_mapping(self, project_path: str, target_files: list[str]) -> dict[str, str]:
         assert os.path.isabs(project_path)
         package_json_path = os.path.join(project_path, "package.json")
         if not os.path.isfile(package_json_path):
@@ -66,17 +65,16 @@ class MipInstaller(Installer):
 
     def install(
         self,
-        extended_specs: Optional[List[str]] = None,
+        extended_specs: list[str] | None = None,
         no_deps: bool = False,
         compile: bool = True,
-        mpy_cross: Optional[str] = None,
+        mpy_cross: str | None = None,
         **kwargs,
     ) -> None:
         """Install packages using mip."""
         # TODO: self.tweak_editable_project_path(meta, ...)
-        pass
 
-    def get_package_latest_version(self, name: str) -> Optional[str]:
+    def get_package_latest_version(self, name: str) -> str | None:
         # TODO:
         return None
 

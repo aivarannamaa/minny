@@ -1,7 +1,6 @@
 import os.path
 import shutil
 import tempfile
-from typing import Dict
 
 from tutils import create_dir_snapshot
 
@@ -10,7 +9,7 @@ from minny.dir_target import DirTargetManager
 from minny.tracking import Tracker
 
 
-def test_no_deps_install(snapshot: Dict[str, int]):
+def test_no_deps_install(snapshot: dict[str, int]):
     # NB! Need to compare to commited state
     cache_dir = tempfile.mkdtemp()
     lib_dir = os.path.join(cache_dir, "lib")
@@ -25,7 +24,7 @@ def test_no_deps_install(snapshot: Dict[str, int]):
     shutil.rmtree(cache_dir)
 
 
-def test_with_deps_install(snapshot: Dict[str, int]):
+def test_with_deps_install(snapshot: dict[str, int]):
     cache_dir = tempfile.mkdtemp()
     lib_dir = os.path.join(cache_dir, "lib")
     os.makedirs(lib_dir)

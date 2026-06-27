@@ -1,8 +1,9 @@
 import json
 import os
+import pathlib
 import zlib
 from logging import getLogger
-from typing import Dict, List, NotRequired, Optional, TypedDict
+from typing import NotRequired, TypedDict
 
 from minny import get_default_minny_cache_dir
 from minny.compiling import Compiler
@@ -21,18 +22,18 @@ class _TrackedFileInfo(TypedDict):
 
 class _TrackedPackageInfo(TypedDict):
     version: str
-    files: List[str]
+    files: list[str]
 
 
-_SingleInstallerTrackedPackages = Dict[str, _TrackedPackageInfo]  # key is package name
+_SingleInstallerTrackedPackages = dict[str, _TrackedPackageInfo]  # key is package name
 
 
 class Tracker:
-    def __init__(self, tmgr: TargetManager, minny_cache_dir: Optional[str] = None):
+    def __init__(self, tmgr: TargetManager, minny_cache_dir: str | None = None):
         self._tmgr = tmgr
         self._minny_cache_dir: str = minny_cache_dir or get_default_minny_cache_dir()
-        self._tracked_files: Dict[str, _TrackedFileInfo] = {}  # key is abs target path
-        self._tracked_packages_by_installer: Dict[
+        self._tracked_files: dict[str, _TrackedFileInfo] = {}  # key is abs target path
+        self._tracked_packages_by_installer: dict[
             str, _SingleInstallerTrackedPackages
         ] = {}  # key is installer name
 
@@ -74,8 +75,7 @@ class Tracker:
             path = self._get_tracking_info_path_for_cookie(cookie)
             # Need to match the new cookie with cache so that later we know it's ours
             os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w") as fp:
-                fp.write("{}")
+            pathlib.Path(path).write_text("{}")
         else:
             path = self._get_tracking_info_path_for_cookie(cookie)
 
@@ -101,7 +101,7 @@ class Tracker:
         compiler: Compiler,
         force: bool = False,
     ) -> str:
-        module_format: Optional[str] = None
+        module_format: str | None = None
         original_target_rel_path = target_rel_path
         assert "\\" not in original_target_rel_path
 
@@ -131,8 +131,7 @@ class Tracker:
         if compile:
             content = compiler.compile_to_bytes(source_abs_path, original_target_rel_path)
         else:
-            with open(source_abs_path, "rb") as fp:
-                content = fp.read()
+            content = pathlib.Path(source_abs_path).read_bytes()
 
         self.smart_write_to_tracked_file(target_path, content)
 
@@ -168,7 +167,7 @@ class Tracker:
         self._save_tracking_info()
 
     def register_package_install(
-        self, installer_name: str, canonical_package_name: str, version: str, files: List[str]
+        self, installer_name: str, canonical_package_name: str, version: str, files: list[str]
     ) -> None:
         if installer_name not in self._tracked_packages_by_installer:
             self._tracked_packages_by_installer[installer_name] = {}
@@ -190,7 +189,7 @@ class Tracker:
 
     def get_package_installation_info(
         self, installer_name: str, canonical_package_name: str
-    ) -> Optional[_TrackedPackageInfo]:
+    ) -> _TrackedPackageInfo | None:
         """Non-None result does not guarantee the package is still installed or intact"""
         if installer_name not in self._tracked_packages_by_installer:
             return None

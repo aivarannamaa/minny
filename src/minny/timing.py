@@ -32,7 +32,7 @@ def report_time(label: str) -> None:
 
     if log_modules and mod_delta > 0:
         current_modules = set(sys.modules.keys())
-        logger.info("NEW MODS %s", list(sorted(current_modules - _last_modules)))
+        logger.info("NEW MODS %s", sorted(current_modules - _last_modules))
         _last_modules = current_modules
 
     _last_time = t

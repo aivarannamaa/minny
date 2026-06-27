@@ -11,7 +11,7 @@ import tempfile
 import urllib.request
 from logging import getLogger
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any
 from urllib.parse import urlsplit
 
 from packaging.requirements import Requirement
@@ -83,8 +83,8 @@ class CircupInstaller(Installer):
         self,
         tmgr: TargetManager,
         tracker: Tracker,
-        target_dir: Optional[str],
-        minny_cache_dir: Optional[str] = None,
+        target_dir: str | None,
+        minny_cache_dir: str | None = None,
     ):
         if minny_cache_dir is None:
             minny_cache_dir = get_default_minny_cache_dir()
@@ -93,9 +93,9 @@ class CircupInstaller(Installer):
         os.makedirs(self._cache_dir, exist_ok=True)
         self._target_dir = self._tmgr.get_default_target()
         logger.debug(f"Circup target dir is {self._target_dir}")
-        self._bundle_metas: Optional[Dict[str, Dict[str, Any]]] = None
+        self._bundle_metas: dict[str, dict[str, Any]] | None = None
 
-    def _get_bundle_metas(self) -> Dict[str, Dict[str, Any]]:
+    def _get_bundle_metas(self) -> dict[str, dict[str, Any]]:
         if self._bundle_metas is None:
             self._bundle_metas = {
                 github_name: self._load_bundle_metadata(github_name)
@@ -104,7 +104,7 @@ class CircupInstaller(Installer):
 
         return self._bundle_metas
 
-    def _load_bundle_metadata(self, github_name) -> Dict[str, Dict]:
+    def _load_bundle_metadata(self, github_name) -> dict[str, dict]:
         owner, repo = github_name.split("/")
         latest_tag = get_latest_github_release_tag(owner, repo)
         bundle_id = repo.lower().replace("_", "-")
@@ -115,8 +115,7 @@ class CircupInstaller(Installer):
             bundle_meta_url = (
                 f"https://github.com/{owner}/{repo}/releases/download/{latest_tag}/{file_name}"
             )
-            with open(cached_path, "wb") as fp:
-                fp.write(download_bytes(bundle_meta_url))
+            Path(cached_path).write_bytes(download_bytes(bundle_meta_url))
             # remove old metadata file
             for name in os.listdir(cache_dir):
                 if name.startswith(f"{bundle_id}") and name.endswith(".json") and name != file_name:
@@ -127,12 +126,12 @@ class CircupInstaller(Installer):
 
     def install(
         self,
-        extended_specs: List[str],
+        extended_specs: list[str],
         no_deps: bool = False,
         compile: bool = True,
-        mpy_cross: Optional[str] = None,
+        mpy_cross: str | None = None,
         pre: bool = False,
-        requirement_files: Optional[List[str]] = None,
+        requirement_files: list[str] | None = None,
         **kwargs,
     ) -> None:
         compiler = Compiler(self._tmgr, mpy_cross, self._minny_cache_dir)
@@ -154,7 +153,7 @@ class CircupInstaller(Installer):
                 compiler=compiler,
             )
 
-    def get_package_latest_version(self, name: str) -> Optional[str]:
+    def get_package_latest_version(self, name: str) -> str | None:
         bundle_info = self._find_package_bundle_info(name)
         if bundle_info is not None:
             return bundle_info.get("version")
@@ -167,7 +166,7 @@ class CircupInstaller(Installer):
         pre: bool,
         no_deps: bool,
         target_dir: str,
-        installation_attempts: List[ExtendedSpec],
+        installation_attempts: list[ExtendedSpec],
         compile: bool,
         compiler: Compiler,
     ) -> None:
@@ -205,8 +204,8 @@ class CircupInstaller(Installer):
         pre: bool,
         no_deps: bool,
         target_dir: str,
-        installation_attempts: List[ExtendedSpec],
-        expected_package_name: Optional[str],
+        installation_attempts: list[ExtendedSpec],
+        expected_package_name: str | None,
         compile: bool,
         compiler: Compiler,
     ) -> None:
@@ -266,7 +265,7 @@ class CircupInstaller(Installer):
         pre: bool,
         no_deps: bool,
         target_dir: str,
-        installation_attempts: List[ExtendedSpec],
+        installation_attempts: list[ExtendedSpec],
         compile: bool,
         compiler: Compiler,
     ) -> None:
@@ -336,7 +335,7 @@ class CircupInstaller(Installer):
         pre: bool,
         no_deps: bool,
         target_dir: str,
-        installation_attempts: List[ExtendedSpec],
+        installation_attempts: list[ExtendedSpec],
         compile: bool,
         compiler: Compiler,
     ):
@@ -347,7 +346,7 @@ class CircupInstaller(Installer):
 
         src_lib_dir = os.path.join(build_path, "lib")
         assert os.path.isdir(src_lib_dir)
-        editable_files: Dict[str, str] = {}
+        editable_files: dict[str, str] = {}
 
         for root, dirs, files in os.walk(src_lib_dir):
             rel_root = os.path.relpath(root, src_lib_dir)
@@ -406,7 +405,7 @@ class CircupInstaller(Installer):
                     compiler=compiler,
                 )
 
-    def _find_package_deps_from_source(self, build_path, canonical_name) -> List[str]:
+    def _find_package_deps_from_source(self, build_path, canonical_name) -> list[str]:
         all_reqs = []
         pypi_reqs_path = Path(build_path, "requirements", canonical_name, "requirements.txt")
         if pypi_reqs_path.is_file():
@@ -426,7 +425,7 @@ class CircupInstaller(Installer):
 
         return all_reqs
 
-    def _load_requirements(self, requirement_files: List[str]) -> List[str]:
+    def _load_requirements(self, requirement_files: list[str]) -> list[str]:
         result = []
         for file in requirement_files:
             for spec in read_requirements_from_txt_file(file):
@@ -441,7 +440,7 @@ class CircupInstaller(Installer):
         name = canonicalize_name(Requirement(spec).name)
         return name in BLINKA_LIBRARIES or name in NOT_MCU_LIBRARIES
 
-    def _pypi_spec_to_circup_spec(self, pypi_spec: str) -> Optional[str]:
+    def _pypi_spec_to_circup_spec(self, pypi_spec: str) -> str | None:
         r = Requirement(pypi_spec)
         pypi_name = r.name
         circup_name = self._pypi_name_to_circup_name(pypi_name)
@@ -451,7 +450,7 @@ class CircupInstaller(Installer):
         assert pypi_spec.startswith(pypi_name)
         return circup_name + pypi_spec[len(pypi_name) :]
 
-    def _find_package_bundle_info(self, name: str) -> Optional[Dict[str, Any]]:
+    def _find_package_bundle_info(self, name: str) -> dict[str, Any] | None:
         name = normalize_circup_name(name)
         for bundle_info in self._get_bundle_metas().values():
             for package_name, package_info in bundle_info.items():
@@ -460,7 +459,7 @@ class CircupInstaller(Installer):
 
         return None
 
-    def _pypi_name_to_circup_name(self, pypi_name: str) -> Optional[str]:
+    def _pypi_name_to_circup_name(self, pypi_name: str) -> str | None:
         for bundle_meta in self._get_bundle_metas().values():
             for name, info in bundle_meta.items():
                 if normalize_name(info.get("pypi_name")) == normalize_name(pypi_name):
@@ -487,7 +486,7 @@ class CircupInstaller(Installer):
     def deslug_package_version(self, version: str) -> str:
         return version.replace("_", "-")
 
-    def get_normalized_no_deploy_packages(self) -> List[str]:
+    def get_normalized_no_deploy_packages(self) -> list[str]:
         return ["circuitpython_typing"]
 
     def _parse_plain_spec(self, plain_spec: str) -> ExtendedSpec:
@@ -513,13 +512,13 @@ class CircupBuilder:
 
     def build_local_package(
         self,
-        package_name: Optional[str],
-        version: Optional[str],
+        package_name: str | None,
+        version: str | None,
         source_dir: str,
         target_dir: str,
         is_temp_source_dir: bool,
-        repo_url: Optional[str] = None,
-    ) -> Tuple[str, str]:
+        repo_url: str | None = None,
+    ) -> tuple[str, str]:
         """
         Treats target_dir as an uncompressed bundle and adds shown package files into it using bundle-like layout.
         """
@@ -593,8 +592,8 @@ class CircupBuilder:
         return package_name, version
 
     def _pip_install_from_source(
-        self, package_name: Optional[str], version: Optional[str], source_dir: str, target_dir: str
-    ) -> Optional[Tuple[str, str]]:
+        self, package_name: str | None, version: str | None, source_dir: str, target_dir: str
+    ) -> tuple[str, str] | None:
         is_shared_target_dir = os.listdir(target_dir) != []
 
         env = os.environ.copy()
@@ -613,9 +612,9 @@ class CircupBuilder:
             logger.debug(f"Could not build {package_name or source_dir} with pip")
             return None
 
-        name_candidates: List[str] = []
-        built_package_name: Optional[str] = None
-        built_version: Optional[str] = None
+        name_candidates: list[str] = []
+        built_package_name: str | None = None
+        built_version: str | None = None
         for name in os.listdir(target_dir):
             path = os.path.join(target_dir, name)
             if name.endswith(".dist-info") and os.path.isdir(path):
@@ -691,7 +690,7 @@ class CircupBuilder:
                 continue
 
             original: bytes = file_path.read_bytes()
-            patched_lines: List[bytes] = []
+            patched_lines: list[bytes] = []
             for line in original.splitlines(keepends=True):
                 if line.startswith(b"__version__"):
                     line = re.sub(b"0.0.0[-+]auto.0", version.encode("utf-8"), line)
@@ -707,7 +706,7 @@ def normalize_circup_name(name: str) -> str:
     return name.lower().strip().replace("-", "_").strip("-")
 
 
-def _fetch_git_refs(repo_url: str) -> Tuple[Dict[str, str], Dict[str, str]]:
+def _fetch_git_refs(repo_url: str) -> tuple[dict[str, str], dict[str, str]]:
     """
     Returns two dictionaries mapping tags to commit hashes and branches (including pseudo-branch HEAD) to commit hashes
     """
@@ -757,9 +756,9 @@ def _find_best_version(
     versions: list[str],
     spec: SpecifierSet,
     prefer_prereleases: bool = False,
-) -> Optional[str]:
+) -> str | None:
     parsed_versions: list[Version] = []
-    originals_by_parsed: Dict[Version, str] = {}
+    originals_by_parsed: dict[Version, str] = {}
     for version in versions:
         try:
             parsed = Version(version)
@@ -794,8 +793,7 @@ def _find_best_version(
 
 
 def _download_git_repo_snapshot(repo_url: str, tag: str, target_dir) -> None:
-    if repo_url.endswith(".git"):
-        repo_url = repo_url[: -len(".git")]
+    repo_url = repo_url.removesuffix(".git")
     repo_url = repo_url.rstrip("/")
     host = urlsplit(repo_url).netloc
     repo_name = repo_url.split("/")[-1]
@@ -818,9 +816,9 @@ def _download_git_repo_snapshot(repo_url: str, tag: str, target_dir) -> None:
                 tar.extractall(target_dir)
 
 
-def read_circup_deps_from_pyproject_toml_file(pyproject_toml_path: Union[Path, str]) -> List[str]:
+def read_circup_deps_from_pyproject_toml_file(pyproject_toml_path: Path | str) -> list[str]:
     return read_circup_deps_from_pyproject_toml(parse_toml_file(pyproject_toml_path))
 
 
-def read_circup_deps_from_pyproject_toml(pyproject_toml: Dict[str, Any]) -> List[str]:
+def read_circup_deps_from_pyproject_toml(pyproject_toml: dict[str, Any]) -> list[str]:
     return pyproject_toml.get("circup", {}).get("circup_dependencies", [])

@@ -2,9 +2,10 @@ import os
 import struct
 import threading
 import time
+from collections.abc import Callable
 from logging import getLogger
 from textwrap import dedent, indent
-from typing import BinaryIO, Callable, List, Tuple, Union
+from typing import BinaryIO
 
 from minny.common import ManagementError
 from minny.target import (
@@ -161,7 +162,7 @@ class BareMetalTargetManager(ProperTargetManager):
 
     def _get_utc_timetuple_from_device(
         self,
-    ) -> Union[Tuple[int, ...], str]:
+    ) -> tuple[int, ...] | str:
         if self._using_simplified_micropython():
             return "This device does not have a real-time clock"
         elif self._connected_to_circuitpython():
@@ -521,7 +522,7 @@ class BareMetalTargetManager(ProperTargetManager):
             else:
                 raise
 
-    def _delete_recursively_via_mount(self, paths: List[str]):
+    def _delete_recursively_via_mount(self, paths: list[str]):
         paths = sorted(paths, key=len, reverse=True)
         for path in paths:
             mounted_path = self._internal_path_to_mounted_path(path)

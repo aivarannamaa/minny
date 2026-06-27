@@ -2,7 +2,6 @@ import os.path
 import textwrap
 import time
 from abc import ABC, abstractmethod
-from typing import List, Optional, Tuple, Union
 
 from minny.connection import MicroPythonConnection
 from minny.target import PASTE_SUBMIT_MODE, ProperTargetManager
@@ -48,11 +47,11 @@ class OsTargetManager(ProperTargetManager, ABC):
             raise ConnectionRefusedError(msg)
 
     @abstractmethod
-    def _which(self, executable: str) -> Optional[str]: ...
+    def _which(self, executable: str) -> str | None: ...
 
     @abstractmethod
     def _create_connection(
-        self, interpreter: str, launch_args: List[str]
+        self, interpreter: str, launch_args: list[str]
     ) -> MicroPythonConnection: ...
 
     def _tweak_welcome_text(self, original: str) -> str:
@@ -112,7 +111,7 @@ class OsTargetManager(ProperTargetManager, ABC):
 
     def _get_utc_timetuple_from_device(
         self,
-    ) -> Union[Tuple[int, ...], str]:
+    ) -> tuple[int, ...] | str:
         out, err = self._execute("__minny_helper.os.system('date -u +%s')", capture_output=True)
         if err:
             return err
@@ -128,12 +127,12 @@ class OsTargetManager(ProperTargetManager, ABC):
 
 
 class LocalOsTargetManager(OsTargetManager):
-    def _create_connection(self, interpreter: str, launch_args: List[str]) -> MicroPythonConnection:
+    def _create_connection(self, interpreter: str, launch_args: list[str]) -> MicroPythonConnection:
         from minny.subprocess_connection import SubprocessConnection
 
         return SubprocessConnection(interpreter, ["-i"] + launch_args)
 
-    def _which(self, executable: str) -> Optional[str]:
+    def _which(self, executable: str) -> str | None:
         import shutil
 
         return shutil.which(executable)

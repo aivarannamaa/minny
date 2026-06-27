@@ -1,7 +1,6 @@
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Dict
 
 from tutils import create_dir_snapshot, prepare_tests_cache_dir
 
@@ -11,7 +10,7 @@ from minny.project import ProjectManager
 from minny.tracking import Tracker
 
 
-def test_basic_deploy(snapshot: Dict[str, int]):
+def test_basic_deploy(snapshot: dict[str, int]):
     cache_dir = prepare_tests_cache_dir()
     target_dir = tempfile.mkdtemp()
     print("Target dir:", target_dir)

@@ -12,9 +12,10 @@ import threading
 import time
 import uuid
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from logging import getLogger
 from textwrap import dedent
-from typing import Any, BinaryIO, Callable, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, BinaryIO, cast
 
 from minny.common import ManagementError, ProtocolError, UserError
 from minny.connection import MicroPythonConnection
@@ -147,7 +148,7 @@ class TargetManager(ABC):
     def _get_tracking_cookie_path(self) -> str:
         return self.join_path(self.get_minny_folder_path(), "cookie")
 
-    def get_existing_tracking_cookie(self) -> Optional[str]:
+    def get_existing_tracking_cookie(self) -> str | None:
         path = self._get_tracking_cookie_path()
         if not self.is_file(path):
             return None
@@ -162,10 +163,10 @@ class TargetManager(ABC):
         return new_cookie
 
     @abstractmethod
-    def try_get_stat(self, path: str) -> Optional[os.stat_result]: ...
+    def try_get_stat(self, path: str) -> os.stat_result | None: ...
 
     @abstractmethod
-    def try_get_crc32(self, path: str) -> Optional[int]:
+    def try_get_crc32(self, path: str) -> int | None:
         """ "Returns crc32 if path refers an existing file or None if path does not exist"""
 
     def is_dir(self, path: str) -> bool:
@@ -183,7 +184,7 @@ class TargetManager(ABC):
     def remove_dir_if_empty(self, path: str) -> bool: ...
 
     @abstractmethod
-    def listdir(self, path: str) -> List[str]: ...
+    def listdir(self, path: str) -> list[str]: ...
 
     @abstractmethod
     def rmdir(self, path: str) -> None: ...
@@ -196,10 +197,10 @@ class TargetManager(ABC):
         return self.get_dir_sep().join([p.rstrip("/\\") for p in parts])
 
     @abstractmethod
-    def get_sys_path(self) -> List[str]: ...
+    def get_sys_path(self) -> list[str]: ...
 
     @abstractmethod
-    def get_sys_implementation(self) -> Dict[str, Any]: ...
+    def get_sys_implementation(self) -> dict[str, Any]: ...
 
     def get_default_target(self) -> str:
         sys_path = self.get_sys_path()
@@ -213,7 +214,7 @@ class TargetManager(ABC):
                 return entry
         raise AssertionError("Could not determine default target")
 
-    def split_dir_and_basename(self, path: str) -> Tuple[str, Optional[str]]:
+    def split_dir_and_basename(self, path: str) -> tuple[str, str | None]:
         dir_name, basename = path.rsplit(self.get_dir_sep(), maxsplit=1)
         if dir_name == "" and path.startswith(self.get_dir_sep()):
             dir_name = self.get_dir_sep()
@@ -229,12 +230,7 @@ class TargetManager(ABC):
         self.write_file(path, content)
 
     def ensure_dir_exists(self, path: str) -> None:
-        if (
-            path in self._ensured_directories
-            or path == "/"
-            or path.endswith(":")
-            or path.endswith(":\\")
-        ):
+        if path in self._ensured_directories or path == "/" or path.endswith((":", ":\\")):
             return
         else:
             parent, _ = self.split_dir_and_basename(path)
@@ -316,17 +312,17 @@ class ProperTargetManager(TargetManager, ABC):
     def __init__(
         self,
         connection: MicroPythonConnection,
-        submit_mode: Optional[str],
-        write_block_size: Optional[int],
-        write_block_delay: Optional[float],
+        submit_mode: str | None,
+        write_block_size: int | None,
+        write_block_delay: float | None,
         uses_local_time: bool,
         clean: bool,
         interrupt: bool,
-        cwd: Optional[str],
+        cwd: str | None,
     ):
         logger.info("Constructing ProperTargetManager of type %s", type(self).__name__)
         super().__init__()
-        self._read_only_filesystem: Optional[bool] = None
+        self._read_only_filesystem: bool | None = None
         self._connection: MicroPythonConnection = connection
         self._submit_mode = submit_mode or RAW_PASTE_SUBMIT_MODE
         self._write_block_size = write_block_size or 255
@@ -334,9 +330,9 @@ class ProperTargetManager(TargetManager, ABC):
             0.01 if self._submit_mode == RAW_SUBMIT_MODE else 0.0
         )
 
-        self._last_prompt: Optional[bytes] = None
+        self._last_prompt: bytes | None = None
         self._startup_time = time.time()
-        self._last_inferred_fs_mount: Optional[str] = None
+        self._last_inferred_fs_mount: str | None = None
 
         logger.info(
             "Initial submit_mode: %s, write_block_size: %s, write_block_delay: %s, ",
@@ -345,21 +341,19 @@ class ProperTargetManager(TargetManager, ABC):
             self._write_block_delay,
         )
 
-        self._is_prepared: Optional[bool] = (
-            False  # None means "probably not, but needs to be checked"
-        )
+        self._is_prepared: bool | None = False  # None means "probably not, but needs to be checked"
         self._io_handler = IOHandler()
 
         self._uses_local_time = uses_local_time
         self._last_interrupt_time = None
         self._local_cwd = None
-        self._cwd: Optional[str] = cwd
+        self._cwd: str | None = cwd
         self._progress_times = {}
-        self._welcome_text: Optional[str] = None
-        self._board_id: Optional[str] = None
-        self._sys_path: Optional[List[str]] = None
+        self._welcome_text: str | None = None
+        self._board_id: str | None = None
+        self._sys_path: list[str] | None = None
         self._sys_implementation = None
-        self._epoch_year: Optional[int] = None
+        self._epoch_year: int | None = None
         self._builtin_modules = []
         self._interrupt_lock = threading.Lock()
         self._number_of_interrupts_sent = 0
@@ -398,12 +392,12 @@ class ProperTargetManager(TargetManager, ABC):
     def get_submit_mode(self) -> str:
         return self._submit_mode
 
-    def try_get_crc32(self, path: str) -> Optional[int]:
+    def try_get_crc32(self, path: str) -> int | None:
         result = self._evaluate(f"__minny_helper.try_file_crc32({path!r})")
         assert result is None or result >= 0
         return result
 
-    def fetch_sys_implementation(self) -> Dict[str, Any]:
+    def fetch_sys_implementation(self) -> dict[str, Any]:
         return self._evaluate(
             "{key: __minny_helper.builtins.getattr(__minny_helper.sys.implementation, key, None) for key in ['name', 'version', '_mpy']}"
         )
@@ -449,18 +443,18 @@ class ProperTargetManager(TargetManager, ABC):
         # TODO:
         return "/.minny"
 
-    def get_sys_path(self) -> List[str]:
+    def get_sys_path(self) -> list[str]:
         if self._sys_path is None:
             self._sys_path = self._fetch_sys_path()
         return self._sys_path
 
-    def get_sys_implementation(self) -> Dict[str, Any]:
+    def get_sys_implementation(self) -> dict[str, Any]:
         if self._sys_implementation is None:
             self._sys_implementation = self._fetch_sys_implementation()
 
         return self._sys_implementation
 
-    def _fetch_sys_implementation(self) -> Dict[str, Any]:
+    def _fetch_sys_implementation(self) -> dict[str, Any]:
         return self._evaluate(
             "{key: __minny_helper.builtins.getattr(__minny_helper.sys.implementation, key, None) for key in ['name', 'version', '_mpy']}"
         )
@@ -567,9 +561,9 @@ class ProperTargetManager(TargetManager, ABC):
 
     def _get_time_for_rtc(self):
         if self._uses_local_time:
-            return datetime.datetime.now().timetuple()
+            return datetime.datetime.now(tz=None).timetuple()
         else:
-            return datetime.datetime.now(tz=datetime.timezone.utc).timetuple()
+            return datetime.datetime.now(tz=datetime.UTC).timetuple()
 
     def validate_time(self) -> None:
         this_computer = self._get_time_for_rtc()
@@ -582,7 +576,7 @@ class ProperTargetManager(TargetManager, ABC):
             remote += (-1,)  # unknown DST
             diff = int(
                 time.mktime(this_computer)
-                - time.mktime(cast(Tuple[int, int, int, int, int, int, int, int, int], remote))
+                - time.mktime(cast(tuple[int, int, int, int, int, int, int, int, int], remote))
             )
             if abs(diff) > 10:
                 print("WARNING: Device's real-time clock seems to be off by %s seconds" % diff)
@@ -592,7 +586,7 @@ class ProperTargetManager(TargetManager, ABC):
 
     def _get_utc_timetuple_from_device(
         self,
-    ) -> Union[Tuple[int, ...], str]:
+    ) -> tuple[int, ...] | str:
         raise NotImplementedError()
 
     def _resolve_unknown_epoch(self) -> int:
@@ -665,7 +659,7 @@ class ProperTargetManager(TargetManager, ABC):
                         file=sys.stderr,
                     )
                     logger.error("Could not use raw_paste, exiting")
-                    exit(1)
+                    sys.exit(1)
             else:
                 self._submit_code_via_raw_mode(to_be_sent)
 
@@ -861,9 +855,9 @@ class ProperTargetManager(TargetManager, ABC):
         self,
         output_consumer: OutputConsumer,
         stream_name="stdout",
-        interrupt_times: Optional[List[float]] = None,
-        poke_after: Optional[float] = None,
-        advice_delay: Optional[float] = None,
+        interrupt_times: list[float] | None = None,
+        poke_after: float | None = None,
+        advice_delay: float | None = None,
     ):
         """Meant for incrementally forwarding stdout from user statements,
         scripts and soft-reboots. Also used for forwarding side-effect output from
@@ -1075,10 +1069,8 @@ class ProperTargetManager(TargetManager, ABC):
                     # Strip all trailing prompts
                     while True:
                         for potential_prompt in prompts:
-                            if pending.endswith(potential_prompt):
-                                pending = pending[: -len(potential_prompt)]
-                        else:
-                            break
+                            pending = pending.removesuffix(potential_prompt)
+                        break
                     output_consumer(self._decode(pending), stream_name)
                     self._last_prompt = current_prompt
                     logger.debug("Found prompt %r", current_prompt)
@@ -1086,9 +1078,7 @@ class ProperTargetManager(TargetManager, ABC):
 
             if pending.endswith(LF):
                 # Maybe it's a penultimate char in a first raw repl?
-                if pending.endswith(FIRST_RAW_PROMPT[:-1]) or pending.endswith(
-                    W600_FIRST_RAW_PROMPT[:-1]
-                ):
+                if pending.endswith((FIRST_RAW_PROMPT[:-1], W600_FIRST_RAW_PROMPT[:-1])):
                     pending += self._connection.soft_read(1)
                     self._connection.unread(pending)
                     pending = b""
@@ -1119,12 +1109,11 @@ class ProperTargetManager(TargetManager, ABC):
                         self._connection.unread(try_again + follow_up)
                         continue
 
-            else:
-                # No prompt in sight.
-                # Output and keep working.
-                output_consumer(self._decode(pending), stream_name)
-                pending = b""
-                continue
+            # No prompt in sight.
+            # Output and keep working.
+            output_consumer(self._decode(pending), stream_name)
+            pending = b""
+            continue
 
     def _capture_output_until_active_prompt(self):
         output = {"stdout": "", "stderr": ""}
@@ -1137,7 +1126,7 @@ class ProperTargetManager(TargetManager, ABC):
         return output["stdout"], output["stderr"]
 
     def _log_output_until_active_prompt(
-        self, interrupt_times: Optional[List[float]] = None, poke_after: Optional[float] = None
+        self, interrupt_times: list[float] | None = None, poke_after: float | None = None
     ) -> None:
         def collect_output(data, stream):
             logger.info("Discarding %s: %r", stream, data)
@@ -1147,7 +1136,7 @@ class ProperTargetManager(TargetManager, ABC):
         )
 
     def _forward_output_until_active_prompt(
-        self, interrupt_times: Optional[List[float]] = None, poke_after: Optional[float] = None
+        self, interrupt_times: list[float] | None = None, poke_after: float | None = None
     ) -> None:
         self._process_output_until_active_prompt(
             self._io_handler._send_output, interrupt_times=interrupt_times, poke_after=poke_after
@@ -1192,13 +1181,13 @@ class ProperTargetManager(TargetManager, ABC):
             "micro:bit" in self._welcome_text.lower() or "calliope" in self._welcome_text.lower()
         ) and "MicroPython" in self._welcome_text
 
-    def _connected_to_pyboard(self) -> Optional[bool]:
+    def _connected_to_pyboard(self) -> bool | None:
         if not self._welcome_text:
             return None
 
         return "pyb" in self._welcome_text.lower() or "pyb" in self._builtin_modules
 
-    def _connected_to_circuitpython(self) -> Optional[bool]:
+    def _connected_to_circuitpython(self) -> bool | None:
         if not self._welcome_text:
             return None
 
@@ -1207,7 +1196,7 @@ class ProperTargetManager(TargetManager, ABC):
     def _get_interpreter_kind(self) -> str:
         return "CircuitPython" if self._connected_to_circuitpython() else "MicroPython"
 
-    def _connected_to_pycom(self) -> Optional[bool]:
+    def _connected_to_pycom(self) -> bool | None:
         if not self._welcome_text:
             return None
 
@@ -1215,7 +1204,7 @@ class ProperTargetManager(TargetManager, ABC):
 
     def _fetch_welcome_text(self) -> str:
         self._write(NORMAL_MODE_CMD)
-        out, err = self._capture_output_until_active_prompt()
+        out, _err = self._capture_output_until_active_prompt()
         welcome_text = out.strip("\r\n >")
         if os.name != "nt":
             welcome_text = welcome_text.replace("\r\n", "\n")
@@ -1251,7 +1240,7 @@ class ProperTargetManager(TargetManager, ABC):
 
         return modules_str.split()
 
-    def _fetch_board_id(self) -> Optional[str]:
+    def _fetch_board_id(self) -> str | None:
         logger.debug("Fetching board_id")
         result = self._evaluate(
             dedent(
@@ -1383,9 +1372,9 @@ class ProperTargetManager(TargetManager, ABC):
 
     def _execute(
         self, script: str, capture_output: bool = False, require_helper: bool = True
-    ) -> Tuple[str, str]:
+    ) -> tuple[str, str]:
         if capture_output:
-            output_lists: Dict[str, List[str]] = {"stdout": [], "stderr": []}
+            output_lists: dict[str, list[str]] = {"stdout": [], "stderr": []}
 
             def consume_output(data, stream_name):
                 assert isinstance(data, str)
@@ -1469,7 +1458,7 @@ class ProperTargetManager(TargetManager, ABC):
         all_bytes = self._connection.read_all(check_error=False)
         data = all_bytes
         met_prompt = False
-        while data.endswith(NORMAL_PROMPT) or data.endswith(FIRST_RAW_PROMPT):
+        while data.endswith((NORMAL_PROMPT, FIRST_RAW_PROMPT)):
             # looks like the device was resetted
             if data.endswith(NORMAL_PROMPT):
                 prompt = NORMAL_PROMPT
@@ -1494,7 +1483,7 @@ class ProperTargetManager(TargetManager, ABC):
     def _supports_directories(self):
         return self._using_simplified_micropython() is False
 
-    def listdir(self, path: str) -> List[str]:
+    def listdir(self, path: str) -> list[str]:
         return self._evaluate(
             f"__minny_helper.print_mgmt_value(__minny_helper.os.listdir({path!r}))"
         )
@@ -1752,10 +1741,10 @@ class ProperTargetManager(TargetManager, ABC):
 
         return bytes_sent
 
-    def delete_recursively(self, paths: List[str]) -> None:
+    def delete_recursively(self, paths: list[str]) -> None:
         self._delete_recursively_via_repl(paths)
 
-    def _delete_recursively_via_repl(self, paths: List[str]) -> None:
+    def _delete_recursively_via_repl(self, paths: list[str]) -> None:
         paths = sorted(paths, key=len, reverse=True)
         self._execute_without_output(
             dedent(
@@ -1779,7 +1768,7 @@ class ProperTargetManager(TargetManager, ABC):
             % paths
         )
 
-    def try_get_stat(self, path: str) -> Optional[os.stat_result]:
+    def try_get_stat(self, path: str) -> os.stat_result | None:
         if not self._supports_directories():
             func = "size"
         else:
@@ -1841,7 +1830,7 @@ class ProperTargetManager(TargetManager, ABC):
 
         return stat[STAT_SIZE_INDEX]
 
-    def _get_stat_mode(self, path: str) -> Optional[int]:
+    def _get_stat_mode(self, path: str) -> int | None:
         stat = self.try_get_stat(path)
         if stat is None:
             return None
@@ -1903,7 +1892,7 @@ class ProperTargetManager(TargetManager, ABC):
         source: str,
         restart_interpreter_before_run: bool,
         populate_argv: bool,
-        argv: List[str],
+        argv: list[str],
     ) -> None:
         if restart_interpreter_before_run:
             self._restart_interpreter()
@@ -1975,7 +1964,7 @@ def ends_overlap(left, right) -> int:
 
 
 def create_target_manager(
-    port: Optional[str], mount: Optional[str], dir: Optional[str], **kw
+    port: str | None, mount: str | None, dir: str | None, **kw
 ) -> TargetManager:
     if port is None and mount is None and dir is None:
         candidates = _infer_possible_targets()
@@ -2014,7 +2003,7 @@ def create_target_manager(
         raise NotImplementedError("mount not supported yet")
 
 
-def _infer_possible_targets() -> List[Tuple[str, str]]:
+def _infer_possible_targets() -> list[tuple[str, str]]:
     from serial.tools.list_ports import comports
 
     candidates = [("port", p.device) for p in comports() if (p.vid, p.pid) in KNOWN_VID_PIDS]
@@ -2072,7 +2061,7 @@ def _mark_nodes_to_be_guarded_from_instrumentation(node, guarded_context):
     if not guarded_context and isinstance(node, ast.FunctionDef):
         guarded_context = True
 
-    setattr(node, "guarded", guarded_context)
+    node.guarded = guarded_context
 
     for child in ast.iter_child_nodes(node):
         _mark_nodes_to_be_guarded_from_instrumentation(child, guarded_context)

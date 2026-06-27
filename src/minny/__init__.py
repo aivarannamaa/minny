@@ -2,7 +2,6 @@ import logging
 import subprocess
 import sys
 import traceback
-from typing import List, Optional
 
 from minny.common import ManagementError, UserError, get_default_minny_cache_dir
 from minny.compiling import Compiler
@@ -22,7 +21,7 @@ def error(msg):
     return 1
 
 
-def main(raw_args: Optional[List[str]] = None) -> int:
+def main(raw_args: list[str] | None = None) -> int:
     from minny import parser
     from minny.circup import CircupInstaller
     from minny.mip import MipInstaller
