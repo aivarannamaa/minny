@@ -14,6 +14,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import urlsplit
 
+from packaging.requirements import Requirement
+from packaging.specifiers import SpecifierSet
+from packaging.utils import canonicalize_name
+from packaging.version import InvalidVersion, Version
+
 from minny import get_default_minny_cache_dir
 from minny.common import UserError
 from minny.compiling import Compiler
@@ -36,10 +41,6 @@ from minny.util import (
     parse_toml_file,
     read_requirements_from_txt_file,
 )
-from packaging.requirements import Requirement
-from packaging.specifiers import SpecifierSet
-from packaging.utils import canonicalize_name
-from packaging.version import InvalidVersion, Version
 
 logger = getLogger(__name__)
 

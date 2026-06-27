@@ -3,10 +3,11 @@ import shutil
 import tempfile
 from typing import Dict
 
+from tutils import create_dir_snapshot
+
 from minny.circup import CircupInstaller
 from minny.dir_target import DirTargetManager
 from minny.tracking import Tracker
-from tutils import create_dir_snapshot
 
 
 def test_no_deps_install(snapshot: Dict[str, int]):

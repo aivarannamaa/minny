@@ -11,6 +11,7 @@ from logging import getLogger
 from typing import List
 
 import pytest
+
 from minny.circup import CircupBuilder, CircupInstaller
 from minny.dir_target import DirTargetManager
 from minny.tracking import Tracker

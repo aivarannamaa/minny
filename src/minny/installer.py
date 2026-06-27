@@ -10,6 +10,8 @@ from logging import getLogger
 from pathlib import Path
 from typing import Dict, List, NotRequired, Optional, TypedDict
 
+from packaging.version import InvalidVersion, Version
+
 from minny import get_default_minny_cache_dir
 from minny.common import UserError
 from minny.compiling import Compiler
@@ -17,7 +19,6 @@ from minny.dir_target import DirTargetManager
 from minny.target import TargetManager
 from minny.tracking import Tracker
 from minny.util import read_requirements_from_txt_file
-from packaging.version import InvalidVersion, Version
 
 logger = getLogger(__name__)
 

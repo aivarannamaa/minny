@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-echo "# isort #######################################"
-uv run isort src tests
+echo "# ruff organize imports #######################################"
+uv run ruff check --select I --fix .
 
 echo "# ruff format #################################"
 uv run ruff format

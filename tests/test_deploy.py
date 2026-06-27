@@ -3,11 +3,12 @@ import tempfile
 from pathlib import Path
 from typing import Dict
 
+from tutils import create_dir_snapshot, prepare_tests_cache_dir
+
 from minny.compiling import Compiler
 from minny.dir_target import DirTargetManager
 from minny.project import ProjectManager
 from minny.tracking import Tracker
-from tutils import create_dir_snapshot, prepare_tests_cache_dir
 
 
 def test_basic_deploy(snapshot: Dict[str, int]):

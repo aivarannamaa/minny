@@ -11,6 +11,8 @@ from logging import getLogger
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from packaging.utils import canonicalize_name, canonicalize_version
+
 from minny.compiling import Compiler
 from minny.installer import (
     META_ENCODING,
@@ -26,7 +28,6 @@ from minny.util import (
     parse_dist_info_dir_name,
     parse_json_file,
 )
-from packaging.utils import canonicalize_name, canonicalize_version
 
 logger = getLogger(__name__)
 
