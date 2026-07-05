@@ -301,12 +301,6 @@ class Installer(ABC):
             meta["files"].append(meta_path)
 
         self.save_package_metadata(meta_path, meta)
-        self._tracker.register_package_install(
-            self.get_installer_name(),
-            canonical_name,
-            version=meta["version"],
-            files=meta["files"],
-        )
         return meta
 
     def apply_editable_install(self, meta: PackageMetadata, espec: ExtendedSpec) -> PackageMetadata:
@@ -336,12 +330,6 @@ class Installer(ABC):
         )
 
         self.save_package_metadata(meta_path, meta)
-        self._tracker.register_package_install(
-            self.get_installer_name(),
-            self.canonicalize_package_name(meta["name"]),
-            version=meta["version"],
-            files=meta["files"],
-        )
         return meta
 
     def compute_files_mapping(self, project_path: str, target_files: list[str]) -> dict[str, str]:
@@ -435,8 +423,6 @@ class Installer(ABC):
                 parent_dir = dir_to_check.rsplit("/", maxsplit=1)[0]
                 if parent_dir not in dirs_to_check and parent_dir != self.get_target_dir():
                     dirs_to_check.append(parent_dir)
-
-        self._tracker.register_package_uninstall(self.get_installer_name(), canonical_name)
 
     def list(self, outdated: bool = False, **kwargs):
         for info in self.get_installed_package_infos().values():
@@ -724,33 +710,6 @@ class Installer(ABC):
         canonical_name = source_package_info.name
         logger.debug(f"check-deploying package '{canonical_name}'")
 
-        # Might there be another version of the same package installed? We need to know the installed files so that
-        # we can delete obsolete files after deployment.
-        # An alternative would be uninstalling the old version first if the version changes, but:
-        # * this can be less efficient (unchanged modules get deleted in vain)
-        # * this would not help with editable packages, which may gain or lose files without changing the version
-        previous_installation_files: list[str] = []
-
-        # Usually this method gets called when a version of the package is already installed and tracked.
-        # This is the case we need to optimize, so we rely on the tracker, not the filesystem.
-        previous_tracked_installation = self._tracker.get_package_installation_info(
-            self.get_installer_name(), canonical_name
-        )
-        if previous_tracked_installation is not None:
-            logger.debug(
-                f"A version of {canonical_name} already installed (according to the tracker)"
-            )
-            previous_installation_files = previous_tracked_installation["files"]
-        else:
-            # the package may still be installed, just not tracked
-            previous_real_installation = self.get_installed_package_info(canonical_name)
-            if previous_real_installation is not None:
-                logger.debug(f"{canonical_name} already installed (according to the filesystem)")
-                previous_real_meta = self.load_package_metadata(previous_real_installation)
-                previous_installation_files = previous_real_meta["files"]
-            else:
-                logger.debug("No version of the package installed yet")
-
         # We proceed by smart-overwriting all existing files (if any), including metadata files
         # (if same version is installed).
         # This will be fast because of the tracking info (files not changed will not be actually overwritten).
@@ -758,15 +717,9 @@ class Installer(ABC):
             source_package_info,
             source_package_meta,
             source_dir,
-            canonical_name,
             compile,
             compiler,
         )
-
-        for file in previous_installation_files:
-            if file not in new_installation_files:
-                print(f"Removing package file left over from the previous installation: {file}")
-                self._tracker.remove_file_if_exists(file)
 
         return new_installation_files
 
@@ -775,7 +728,6 @@ class Installer(ABC):
         source_package_info: PackageInstallationInfo,
         source_package_meta: PackageMetadata,
         source_dir: str,
-        canonical_name: str,
         compile: bool,
         compiler: Compiler,
     ) -> builtins.list[str]:
@@ -827,13 +779,6 @@ class Installer(ABC):
         )
         target_metadata["files"].append(target_rel_meta_path)
         self.save_package_metadata(target_rel_meta_path, target_metadata)
-
-        self._tracker.register_package_install(
-            self.get_installer_name(),
-            canonical_name,
-            version=target_metadata["version"],
-            files=target_metadata["files"],
-        )
 
         return target_metadata["files"]
 

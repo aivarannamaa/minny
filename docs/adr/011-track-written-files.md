@@ -53,7 +53,7 @@ When the user does change the files with tools other than Minny, or suspects cor
 - The first deployment after losing local tracking state can still avoid rewriting files that already match, because Minny can compare the desired CRC32 with the target file's CRC32.
 - Managing the device from different Minny installations does not create unwarranted assumptions about the device content.
 - The design works even when target timestamps are missing, unreliable, or impossible to set.
-- The tracker can support package cleanup by remembering the files installed by the previous tracked package version.
+- The same tracking file can also hold directory inventories.
 - The device-side footprint is small: only a cookie needs to live on the device.
 
 #### Negative

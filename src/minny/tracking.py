@@ -3,7 +3,7 @@ import os
 import pathlib
 import zlib
 from logging import getLogger
-from typing import NotRequired, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 from minny import get_default_minny_cache_dir
 from minny.compiling import Compiler
@@ -20,12 +20,8 @@ class _TrackedFileInfo(TypedDict):
     module_format: NotRequired[str]
 
 
-class _TrackedPackageInfo(TypedDict):
-    version: str
-    files: list[str]
-
-
-_SingleInstallerTrackedPackages = dict[str, _TrackedPackageInfo]  # key is package name
+_TrackedFolderEntryKind = Literal["file", "dir", "other"]
+_TrackedFolderInfo = dict[str, _TrackedFolderEntryKind]  # key is child basename
 
 
 class Tracker:
@@ -33,9 +29,7 @@ class Tracker:
         self._tmgr = tmgr
         self._minny_cache_dir: str = minny_cache_dir or get_default_minny_cache_dir()
         self._tracked_files: dict[str, _TrackedFileInfo] = {}  # key is abs target path
-        self._tracked_packages_by_installer: dict[
-            str, _SingleInstallerTrackedPackages
-        ] = {}  # key is installer name
+        self._tracked_folders: dict[str, _TrackedFolderInfo] = {}  # key is abs target path
 
     def _load_tracking_info(self) -> None:
         path = self._get_tracking_info_path()
@@ -46,8 +40,8 @@ class Tracker:
         logger.debug(f"Loading device state from '{path}'")
         data = parse_json_file(path)
 
-        self._tracked_files = data["tracked_files"]
-        self._tracked_packages_by_installer = data["tracked_packages"]
+        self._tracked_files = data.get("tracked_files", {})
+        self._tracked_folders = data.get("tracked_folders", {})
 
     def _save_tracking_info(self) -> None:
         path = self._get_tracking_info_path()
@@ -57,7 +51,7 @@ class Tracker:
             json.dump(
                 {
                     "tracked_files": self._tracked_files,
-                    "tracked_packages": self._tracked_packages_by_installer,
+                    "tracked_folders": self._tracked_folders,
                 },
                 fp,
             )
@@ -88,9 +82,7 @@ class Tracker:
         self._tmgr.remove_file_if_exists(path)
         if path in self._tracked_files:
             del self._tracked_files[path]
-
-        # TODO: if looks like package metadata file, and the same version is tracked, then register_package_uninstall
-        # (required with deploy --delete)
+        self._remove_from_tracked_parent_folder(path)
 
     def smart_upload(
         self,
@@ -164,37 +156,35 @@ class Tracker:
             self._tmgr.ensure_dir_and_write_file(target_path, content)
 
         self._tracked_files[target_path] = _TrackedFileInfo(crc32=source_crc32)
+        self._add_to_tracked_parent_folder(target_path, "file")
         self._save_tracking_info()
 
-    def register_package_install(
-        self, installer_name: str, canonical_package_name: str, version: str, files: list[str]
-    ) -> None:
-        if installer_name not in self._tracked_packages_by_installer:
-            self._tracked_packages_by_installer[installer_name] = {}
+    def record_folder_inventory(self, folder_path: str) -> None:
+        folder_info: _TrackedFolderInfo = {}
+        for name in self._tmgr.listdir(folder_path):
+            if name in (".", ".."):
+                continue
 
-        self._tracked_packages_by_installer[installer_name][canonical_package_name] = (
-            _TrackedPackageInfo(version=version, files=files)
-        )
+            path = self._tmgr.join_path(folder_path, name)
+            if self._tmgr.is_dir(path):
+                folder_info[name] = "dir"
+            elif self._tmgr.is_file(path):
+                folder_info[name] = "file"
+            else:
+                folder_info[name] = "other"
+
+        self._tracked_folders[folder_path] = folder_info
         self._save_tracking_info()
 
-    def register_package_uninstall(self, installer_name: str, canonical_package_name: str) -> None:
-        if installer_name not in self._tracked_packages_by_installer:
-            return
+    def _add_to_tracked_parent_folder(self, path: str, entry_kind: _TrackedFolderEntryKind) -> None:
+        parent_path, basename = self._tmgr.split_dir_and_basename(path)
+        if basename is not None and parent_path in self._tracked_folders:
+            self._tracked_folders[parent_path][basename] = entry_kind
 
-        if canonical_package_name not in self._tracked_packages_by_installer[installer_name]:
-            return
-
-        del self._tracked_packages_by_installer[installer_name][canonical_package_name]
-        self._save_tracking_info()
-
-    def get_package_installation_info(
-        self, installer_name: str, canonical_package_name: str
-    ) -> _TrackedPackageInfo | None:
-        """Non-None result does not guarantee the package is still installed or intact"""
-        if installer_name not in self._tracked_packages_by_installer:
-            return None
-
-        return self._tracked_packages_by_installer[installer_name].get(canonical_package_name, None)
+    def _remove_from_tracked_parent_folder(self, path: str) -> None:
+        parent_path, basename = self._tmgr.split_dir_and_basename(path)
+        if basename is not None and parent_path in self._tracked_folders:
+            self._tracked_folders[parent_path].pop(basename, None)
 
 
 class DummyTracker(Tracker):
