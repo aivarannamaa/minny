@@ -23,7 +23,6 @@ from minny import get_default_minny_cache_dir
 from minny.common import UserError
 from minny.compiling import Compiler
 from minny.installer import (
-    EditableInfo,
     ExtendedSpec,
     Installer,
     PackageMetadata,
@@ -124,31 +123,24 @@ class CircupInstaller(Installer):
         with open(cached_path, "rb") as fp:
             return json.load(fp)
 
-    def install(
+    def _install_package_without_dependencies(
         self,
-        extended_specs: list[str],
-        no_deps: bool = False,
+        espec: ExtendedSpec,
+        compiler: Compiler,
         compile: bool = True,
-        mpy_cross: str | None = None,
-        pre: bool = False,
-        requirement_files: list[str] | None = None,
-        **kwargs,
-    ) -> None:
-        compiler = Compiler(self._tmgr, mpy_cross, self._minny_cache_dir)
-        requirement_files = requirement_files or []
-        all_extended_specs = extended_specs + self._load_requirements(requirement_files)
-
-        self.validate_specs(all_extended_specs)
-
-        installation_attempts = []
-
-        for espec_str in all_extended_specs:
-            self._install_package(
-                self.parse_extended_spec(espec_str),
-                pre=pre,
-                no_deps=no_deps,
+    ) -> PackageMetadata:
+        if espec.is_local_dir_spec():
+            return self._install_local_package(
+                espec=espec,
                 target_dir=self._target_dir,
-                installation_attempts=installation_attempts,
+                expected_package_name=None,
+                compile=compile,
+                compiler=compiler,
+            )
+        else:
+            return self._install_bundle_package(
+                espec=espec,
+                target_dir=self._target_dir,
                 compile=compile,
                 compiler=compiler,
             )
@@ -160,55 +152,18 @@ class CircupInstaller(Installer):
         else:
             return None
 
-    def _install_package(
-        self,
-        espec: ExtendedSpec,
-        pre: bool,
-        no_deps: bool,
-        target_dir: str,
-        installation_attempts: list[ExtendedSpec],
-        compile: bool,
-        compiler: Compiler,
-    ) -> None:
-        if espec in installation_attempts:
-            logger.debug(f"Skipping another install of '{espec}' to avoid infinite recursion.")
-            return
-
-        installation_attempts.append(espec)
-
-        if espec.is_local_dir_spec():
-            self._install_local_package(
-                espec=espec,
-                pre=pre,
-                no_deps=no_deps,
-                target_dir=target_dir,
-                installation_attempts=installation_attempts,
-                expected_package_name=None,
-                compile=compile,
-                compiler=compiler,
-            )
-        else:
-            self._install_bundle_package(
-                espec=espec,
-                pre=pre,
-                no_deps=no_deps,
-                target_dir=target_dir,
-                installation_attempts=installation_attempts,
-                compile=compile,
-                compiler=compiler,
-            )
+    def is_package_version_compatible(self, espec: ExtendedSpec, version: str) -> bool:
+        requirement = Requirement(espec.plain_spec)
+        return Version(version) in requirement.specifier
 
     def _install_local_package(
         self,
         espec: ExtendedSpec,
-        pre: bool,
-        no_deps: bool,
         target_dir: str,
-        installation_attempts: list[ExtendedSpec],
         expected_package_name: str | None,
         compile: bool,
         compiler: Compiler,
-    ) -> None:
+    ) -> PackageMetadata:
         parsed_package_name = espec.name
         source_dir = espec.location
         assert source_dir is not None
@@ -244,39 +199,28 @@ class CircupInstaller(Installer):
             is_temp_source_dir=False,
         )
 
-        self._install_built_package(
+        meta = self._install_built_package(
             espec,
             temp_build_path,
             package_name,
             version,
-            pre,
-            no_deps,
             target_dir,
-            installation_attempts,
             compile,
             compiler,
         )
 
         shutil.rmtree(temp_build_path)
+        return meta
 
     def _install_bundle_package(
         self,
         espec: ExtendedSpec,
-        pre: bool,
-        no_deps: bool,
         target_dir: str,
-        installation_attempts: list[ExtendedSpec],
         compile: bool,
         compiler: Compiler,
-    ) -> None:
+    ) -> PackageMetadata:
         requirement = Requirement(espec.plain_spec)
         canonical_name = normalize_circup_name(requirement.name)
-        installed_info = self.get_installed_package_info(canonical_name)
-        if installed_info is not None and installed_info.version in requirement.specifier:
-            print(
-                f"Compatible version of {requirement} is already installed ({installed_info.version})."
-            )
-            return
 
         for bundle_id, bundle_meta in self._get_bundle_metas().items():
             package_bundle_meta = bundle_meta.get(canonical_name)
@@ -294,7 +238,7 @@ class CircupInstaller(Installer):
                 repo_url if repo_url.endswith(".git") else repo_url.rstrip("/") + ".git"
             )[0].keys()
         )
-        version = _find_best_version(tags, requirement.specifier, prefer_prereleases=pre)
+        version = _find_best_version(tags, requirement.specifier, prefer_prereleases=False)
         assert version is not None  # TODO
         if not is_safe_version(version):
             raise UserError(
@@ -313,15 +257,12 @@ class CircupInstaller(Installer):
         else:
             logger.info("Version is already in cache")
 
-        self._install_built_package(
+        return self._install_built_package(
             espec,
             build_path,
             canonical_name,
             version,
-            pre,
-            no_deps,
             target_dir,
-            installation_attempts,
             compile,
             compiler,
         )
@@ -332,13 +273,10 @@ class CircupInstaller(Installer):
         build_path: str,
         canonical_name: str,
         version: str,
-        pre: bool,
-        no_deps: bool,
         target_dir: str,
-        installation_attempts: list[ExtendedSpec],
         compile: bool,
         compiler: Compiler,
-    ):
+    ) -> PackageMetadata:
         # TODO: add actual name instead of canonical, license, summary, urls
         meta = PackageMetadata(
             name=canonical_name, version=version, files=[], requirement=espec.extended_spec
@@ -346,7 +284,6 @@ class CircupInstaller(Installer):
 
         src_lib_dir = os.path.join(build_path, "lib")
         assert os.path.isdir(src_lib_dir)
-        editable_files: dict[str, str] = {}
 
         for root, dirs, files in os.walk(src_lib_dir):
             rel_root = os.path.relpath(root, src_lib_dir)
@@ -355,55 +292,19 @@ class CircupInstaller(Installer):
                 source_abs_path = os.path.join(root, file_name)
                 target_rel_path = self._tmgr.join_path(rel_root, file_name)
 
-                if espec.editable:
-                    assert espec.location is not None
-                    project_rel_path = self.locate_target_file_in_project(
-                        target_rel_path, os.path.abspath(espec.location)
-                    )
-                    if project_rel_path is not None:
-                        editable_files[target_rel_path] = project_rel_path
-                        continue
-
-                final_target_rel_path = self._tracker.smart_upload(
-                    source_abs_path, target_dir, target_rel_path, compile, compiler
+                final_target_rel_path = self.upload_package_file(
+                    source_abs_path,
+                    target_rel_path,
+                    compile,
+                    compiler,
+                    target_dir=target_dir,
                 )
                 meta["files"].append(final_target_rel_path)
 
         deps = self._find_package_deps_from_source(build_path, canonical_name)
         meta["dependencies"] = deps
 
-        meta_path = self.get_relative_metadata_path(canonical_name, version)
-        meta["files"].append(meta_path)
-
-        if espec.editable:
-            assert espec.location is not None
-            meta["editable"] = EditableInfo(
-                project_path=espec.location
-                if os.path.isabs(espec.location)
-                else self.reanchor_at_lib_dir(espec.location),
-                project_fingerprint=self.compute_project_fingerprint(espec.location),
-                files=editable_files,
-            )
-
-        self.save_package_metadata(meta_path, meta)
-        self._tracker.register_package_install(
-            self.get_installer_name(),
-            canonical_name,
-            version=version,
-            files=meta["files"],
-        )
-
-        if not no_deps:
-            for req in deps:
-                self._install_package(
-                    self.parse_extended_spec(req),
-                    pre=pre,
-                    no_deps=False,
-                    target_dir=target_dir,
-                    installation_attempts=installation_attempts,
-                    compile=compile,
-                    compiler=compiler,
-                )
+        return self.finalize_package_install(meta)
 
     def _find_package_deps_from_source(self, build_path, canonical_name) -> list[str]:
         all_reqs = []

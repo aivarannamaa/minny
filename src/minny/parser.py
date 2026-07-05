@@ -235,56 +235,10 @@ def parse_arguments(raw_args: list[str] | None = None) -> Any:
             metavar="<file>",
             default=[],
         )
-        if parser in [pip_install_parser]:
-            specs_group.add_argument(
-                "-c",
-                "--constraint",
-                help="Constrain versions using the given constraints file.",
-                action="append",
-                dest="constraint_files",
-                metavar="<file>",
-                default=[],
-            )
         specs_group.add_argument(
             "--no-deps",
             help="Don't install package dependencies.",
             action="store_true",
-        )
-        specs_group.add_argument(
-            "--pre",
-            help="Include pre-release and development versions. By default, minny only finds stable versions.",
-            action="store_true",
-        )
-
-    # index-related
-    for parser in [pip_install_parser, pip_list_parser]:
-        index_group = parser.add_argument_group(title="index selection")
-        index_group.add_argument(
-            "-i",
-            "--index-url",
-            help="Base URL of the Python Package Index (default https://pypi.org/simple).",
-            metavar="<url>",
-        )
-        index_group.add_argument(
-            "--extra-index-url",
-            help="Extra URLs of package indexes to use in addition to --index-url.",
-            action="append",
-            dest="extra_index_urls",
-            default=[],
-            metavar="<url>",
-        )
-        index_group.add_argument(
-            "--no-index",
-            help="Ignore package index (only looking at --find-links URLs instead).",
-            action="store_true",
-        )
-        index_group.add_argument(
-            "-f",
-            "--find-links",
-            help="If a URL or path to an html file, then parse for links to archives such as sdist "
-            "(.tar.gz) or wheel (.whl) files. If a local path or "
-            "file:// URL that's a directory, then look for archives in the directory listing.",
-            metavar="<url|file|dir>",
         )
 
     for parser in [pip_uninstall_parser, pip_show_parser, circup_uninstall_parser]:

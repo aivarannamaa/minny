@@ -1,6 +1,6 @@
 ## Starting a session
 
-- Read README.md to get acquainted. No need to mirror your understanding back to me at this point.
+- Read README.md and decisions from docs/adr to get acquainted. No need to mirror your understanding back to me at this point.
 
 ## Working style
 

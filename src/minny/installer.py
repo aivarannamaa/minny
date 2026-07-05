@@ -4,6 +4,7 @@ import fnmatch
 import hashlib
 import json
 import os.path
+import tempfile
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from dataclasses import dataclass
@@ -117,15 +118,253 @@ class Installer(ABC):
         finally:
             os.chdir(old_wd)
 
-    @abstractmethod
     def install(
         self,
-        extended_specs: list[str],
+        extended_specs: list[str] | None = None,
         no_deps: bool = False,
         compile: bool = True,
         mpy_cross: str | None = None,
+        requirement_files: list[str] | None = None,
+        upgrade: bool = False,
+        force_reinstall: bool = False,
         **kwargs,
-    ) -> None: ...
+    ) -> None:
+        extended_specs = extended_specs or []
+        all_extended_specs = extended_specs + self._load_requirements(requirement_files or [])
+
+        self.validate_specs(all_extended_specs)
+
+        compiler = Compiler(self._tmgr, mpy_cross, self._minny_cache_dir)
+        installation_attempts: list[ExtendedSpec] = []
+
+        for espec_str in all_extended_specs:
+            self._install_package_and_dependencies(
+                self.parse_extended_spec(espec_str),
+                no_deps=no_deps,
+                compile=compile,
+                compiler=compiler,
+                installation_attempts=installation_attempts,
+                upgrade=upgrade,
+                force_reinstall=force_reinstall,
+            )
+
+    def _load_requirements(self, requirement_files: list[str]) -> list[str]:
+        result = []
+        for file in requirement_files:
+            result.extend(read_requirements_from_txt_file(file))
+
+        return result
+
+    def _install_package_and_dependencies(
+        self,
+        espec: ExtendedSpec,
+        no_deps: bool,
+        compile: bool,
+        compiler: Compiler,
+        installation_attempts: list[ExtendedSpec],
+        upgrade: bool,
+        force_reinstall: bool,
+    ) -> PackageMetadata:
+        if espec in installation_attempts:
+            logger.debug(f"Skipping another install of '{espec}' to avoid infinite recursion.")
+            candidates = [
+                meta
+                for meta in self.get_installed_package_metas().values()
+                if meta.get("requirement") == espec.extended_spec
+            ]
+            if candidates:
+                return candidates[0]
+            raise UserError(f"Recursive dependency on {espec} could not be resolved")
+
+        installation_attempts.append(espec)
+
+        if not force_reinstall and not upgrade and espec.name is not None:
+            canonical_name = self.canonicalize_package_name(espec.name)
+            installed_info = self.get_installed_package_info(canonical_name)
+            if installed_info is not None and self.is_package_version_compatible(
+                espec, installed_info.version
+            ):
+                print(
+                    f"Compatible version of {espec.plain_spec} is already installed "
+                    f"({installed_info.version})."
+                )
+                meta = self.load_package_metadata(installed_info)
+                if not no_deps:
+                    self._install_dependencies(
+                        meta,
+                        compile=compile,
+                        compiler=compiler,
+                        installation_attempts=installation_attempts,
+                        upgrade=upgrade,
+                        force_reinstall=force_reinstall,
+                    )
+                return meta
+
+        meta = self._install_package_without_dependencies(
+            espec=espec,
+            compile=compile,
+            compiler=compiler,
+        )
+        meta = self.apply_editable_install(meta, espec)
+
+        if not no_deps:
+            self._install_dependencies(
+                meta,
+                compile=compile,
+                compiler=compiler,
+                installation_attempts=installation_attempts,
+                upgrade=upgrade,
+                force_reinstall=force_reinstall,
+            )
+
+        return meta
+
+    def _install_dependencies(
+        self,
+        meta: PackageMetadata,
+        compile: bool,
+        compiler: Compiler,
+        installation_attempts: list[ExtendedSpec],
+        upgrade: bool,
+        force_reinstall: bool,
+    ) -> None:
+        for req in self.get_dependency_specs(meta):
+            self._install_package_and_dependencies(
+                self.parse_extended_spec(req),
+                no_deps=False,
+                compile=compile,
+                compiler=compiler,
+                installation_attempts=installation_attempts,
+                upgrade=upgrade,
+                force_reinstall=force_reinstall,
+            )
+
+    def get_dependency_specs(self, meta: PackageMetadata) -> list[str]:
+        return meta.get("dependencies", [])
+
+    def upload_package_file(
+        self,
+        source_path: str,
+        target_rel_path: str,
+        compile: bool,
+        compiler: Compiler,
+        target_dir: str | None = None,
+    ) -> str:
+        return self._tracker.smart_upload(
+            source_path,
+            target_dir or self.get_target_dir(),
+            target_rel_path,
+            compile,
+            compiler,
+        )
+
+    def upload_package_bytes(
+        self,
+        content: bytes,
+        source_file_name: str,
+        target_rel_path: str,
+        compile: bool,
+        compiler: Compiler,
+        target_dir: str | None = None,
+    ) -> str:
+        original_target_rel_path = target_rel_path
+        assert "\\" not in original_target_rel_path
+
+        if target_rel_path.endswith(".py"):
+            if compile:
+                target_rel_path = target_rel_path[:-3] + ".mpy"
+
+        if compile:
+            suffix = os.path.splitext(source_file_name)[1]
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as fp:
+                fp.write(content)
+                temp_path = fp.name
+
+            try:
+                content = compiler.compile_to_bytes(temp_path, original_target_rel_path)
+            finally:
+                os.remove(temp_path)
+
+        target_path = self._tmgr.join_path(target_dir or self.get_target_dir(), target_rel_path)
+        self._tracker.smart_write_to_tracked_file(target_path, content)
+
+        return target_rel_path
+
+    def finalize_package_install(self, meta: PackageMetadata) -> PackageMetadata:
+        canonical_name = self.canonicalize_package_name(meta["name"])
+        installed_info = self.get_installed_package_info(canonical_name)
+        if installed_info is not None and installed_info.version != meta["version"]:
+            self._uninstall_package(canonical_name)
+
+        meta_path = self.get_relative_metadata_path(meta["name"], meta["version"])
+        if meta_path not in meta["files"]:
+            meta["files"].append(meta_path)
+
+        self.save_package_metadata(meta_path, meta)
+        self._tracker.register_package_install(
+            self.get_installer_name(),
+            canonical_name,
+            version=meta["version"],
+            files=meta["files"],
+        )
+        return meta
+
+    def apply_editable_install(self, meta: PackageMetadata, espec: ExtendedSpec) -> PackageMetadata:
+        if not espec.editable:
+            return meta
+
+        if espec.location is None or not os.path.isdir(espec.location):
+            raise UserError("Editable installs require a local project directory")
+
+        project_path = os.path.abspath(espec.location)
+        meta_path = self.get_relative_metadata_path(meta["name"], meta["version"])
+        target_files = [path for path in meta["files"] if path != meta_path]
+        editable_files = self.compute_files_mapping(project_path, target_files)
+
+        for target_rel_path in editable_files:
+            if target_rel_path in meta["files"]:
+                target_abs_path = self._tmgr.join_path(self.get_target_dir(), target_rel_path)
+                self._tracker.remove_file_if_exists(target_abs_path)
+                meta["files"].remove(target_rel_path)
+
+        meta["editable"] = EditableInfo(
+            project_path=espec.location
+            if os.path.isabs(espec.location)
+            else self.reanchor_at_lib_dir(espec.location),
+            project_fingerprint=self.compute_project_fingerprint(espec.location),
+            files=editable_files,
+        )
+
+        self.save_package_metadata(meta_path, meta)
+        self._tracker.register_package_install(
+            self.get_installer_name(),
+            self.canonicalize_package_name(meta["name"]),
+            version=meta["version"],
+            files=meta["files"],
+        )
+        return meta
+
+    def compute_files_mapping(self, project_path: str, target_files: list[str]) -> dict[str, str]:
+        assert os.path.isabs(project_path)
+        result = {}
+
+        for target_file in target_files:
+            project_rel_path = self.locate_target_file_in_project(target_file, project_path)
+            if project_rel_path is not None:
+                result[target_file] = project_rel_path
+
+        return result
+
+    @abstractmethod
+    def _install_package_without_dependencies(
+        self,
+        espec: ExtendedSpec,
+        compiler: Compiler,
+        compile: bool,
+    ) -> PackageMetadata: ...
+
+    @abstractmethod
+    def is_package_version_compatible(self, espec: ExtendedSpec, version: str) -> bool: ...
 
     def uninstall(
         self,
@@ -161,6 +400,12 @@ class Installer(ABC):
             parsed_spec = self.parse_extended_spec(spec)
             if parsed_spec.editable and not self.supports_editable_installs():
                 raise UserError("Editable install is allowed only with DirTargetManager")
+            if parsed_spec.editable and (
+                parsed_spec.location is None
+                or not looks_like_local_dir(parsed_spec.location)
+                or not os.path.isdir(parsed_spec.location)
+            ):
+                raise UserError("Editable installs require a local project directory")
 
     def _uninstall_package(self, name: str) -> None:
         canonical_name = self.canonicalize_package_name(name)
