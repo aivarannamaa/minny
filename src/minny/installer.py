@@ -6,7 +6,6 @@ import json
 import os.path
 import tempfile
 from abc import ABC, abstractmethod
-from copy import deepcopy
 from dataclasses import dataclass
 from logging import getLogger
 from pathlib import Path
@@ -19,7 +18,6 @@ from minny.common import UserError
 from minny.compiling import Compiler
 from minny.dir_target import DirTargetManager
 from minny.target import TargetManager
-from minny.tracking import Tracker
 from minny.util import read_requirements_from_txt_file
 
 logger = getLogger(__name__)
@@ -82,18 +80,28 @@ class PackageInstallationInfo:
             raise ValueError("rel_meta_file_path must not be empty")
 
 
+@dataclasses.dataclass(frozen=True)
+class PackageDeployUpload:
+    target_rel_path: str
+    source_abs_path: str
+
+
+@dataclasses.dataclass(frozen=True)
+class PackageDeployRecipe:
+    metadata: PackageMetadata
+    uploads: list[PackageDeployUpload]
+
+
 class Installer(ABC):
     """Base class for all package installers."""
 
     def __init__(
         self,
         tmgr: TargetManager,
-        tracker: Tracker,
         target_dir: str | None,
         minny_cache_dir: str | None = None,
     ):
         self._tmgr = tmgr
-        self._tracker = tracker
         self._minny_cache_dir = minny_cache_dir or get_default_minny_cache_dir()
         self._custom_target_dir: str | None = target_dir
         self._quiet = False
@@ -250,13 +258,20 @@ class Installer(ABC):
         compiler: Compiler,
         target_dir: str | None = None,
     ) -> str:
-        return self._tracker.smart_upload(
-            source_path,
-            target_dir or self.get_target_dir(),
-            target_rel_path,
-            compile,
-            compiler,
-        )
+        original_target_rel_path = target_rel_path
+        assert "\\" not in original_target_rel_path
+
+        if target_rel_path.endswith(".py") and compile:
+            target_rel_path = target_rel_path[:-3] + ".mpy"
+
+        if compile:
+            content = compiler.compile_to_bytes(source_path, original_target_rel_path)
+        else:
+            content = Path(source_path).read_bytes()
+
+        target_path = self._tmgr.join_path(target_dir or self.get_target_dir(), target_rel_path)
+        self._tmgr.ensure_dir_and_write_file(target_path, content)
+        return target_rel_path
 
     def upload_package_bytes(
         self,
@@ -286,7 +301,7 @@ class Installer(ABC):
                 os.remove(temp_path)
 
         target_path = self._tmgr.join_path(target_dir or self.get_target_dir(), target_rel_path)
-        self._tracker.smart_write_to_tracked_file(target_path, content)
+        self._tmgr.ensure_dir_and_write_file(target_path, content)
 
         return target_rel_path
 
@@ -318,7 +333,7 @@ class Installer(ABC):
         for target_rel_path in editable_files:
             if target_rel_path in meta["files"]:
                 target_abs_path = self._tmgr.join_path(self.get_target_dir(), target_rel_path)
-                self._tracker.remove_file_if_exists(target_abs_path)
+                self._tmgr.remove_file_if_exists(target_abs_path)
                 meta["files"].remove(target_rel_path)
 
         meta["editable"] = EditableInfo(
@@ -409,7 +424,7 @@ class Installer(ABC):
         for file_rel_path in package_meta["files"]:
             full_path = self._tmgr.join_path(self.get_target_dir(), file_rel_path)
             print("Uninstalling:", full_path)
-            if self._tracker.remove_file_if_exists(full_path):
+            if self._tmgr.remove_file_if_exists(full_path):
                 parent_dir = full_path.rsplit(self._tmgr.get_dir_sep(), maxsplit=1)[0]
                 if parent_dir not in dirs_to_check:
                     dirs_to_check.append(parent_dir)
@@ -465,7 +480,7 @@ class Installer(ABC):
             rel_meta_path,
         )
         content = self.compile_package_metadata(meta)
-        self._tracker.smart_write_to_tracked_file(full_path, content)
+        self._tmgr.ensure_dir_and_write_file(full_path, content)
 
     def compile_package_metadata(self, meta: PackageMetadata) -> bytes:
         return json.dumps(meta, sort_keys=True).encode(META_ENCODING)
@@ -699,40 +714,13 @@ class Installer(ABC):
 
         return h.hexdigest()
 
-    def smart_deploy_or_replace_locally_installed_package(
+    def create_deploy_recipe(
         self,
         source_dir: str,
         source_package_info: PackageInstallationInfo,
         source_package_meta: PackageMetadata,
-        compile: bool,
-        compiler: Compiler,
-    ) -> builtins.list[str]:
-        canonical_name = source_package_info.name
-        logger.debug(f"check-deploying package '{canonical_name}'")
-
-        # We proceed by smart-overwriting all existing files (if any), including metadata files
-        # (if same version is installed).
-        # This will be fast because of the tracking info (files not changed will not be actually overwritten).
-        new_installation_files = self._deploy_locally_installed_package(
-            source_package_info,
-            source_package_meta,
-            source_dir,
-            compile,
-            compiler,
-        )
-
-        return new_installation_files
-
-    def _deploy_locally_installed_package(
-        self,
-        source_package_info: PackageInstallationInfo,
-        source_package_meta: PackageMetadata,
-        source_dir: str,
-        compile: bool,
-        compiler: Compiler,
-    ) -> builtins.list[str]:
-        logger.info(f"Start deploying package {source_package_info}")
-        target_metadata = deepcopy(source_package_meta)
+    ) -> PackageDeployRecipe:
+        target_metadata = source_package_meta.copy()
         target_metadata["files"] = []
 
         upload_map: dict[str, str] = {}  # rel destination => rel source (from source_dir)
@@ -757,6 +745,7 @@ class Installer(ABC):
             if local_installation_source_path != source_package_info.rel_meta_file_path:
                 upload_map[local_installation_source_path] = local_installation_source_path
 
+        uploads = []
         for target_rel_path, local_installation_source_path in sorted(upload_map.items()):
             if os.path.isabs(local_installation_source_path):
                 abs_source_path = local_installation_source_path
@@ -765,22 +754,9 @@ class Installer(ABC):
                     os.path.join(source_dir, local_installation_source_path)
                 )
 
-            final_target_rel_path = self._tracker.smart_upload(
-                abs_source_path,
-                self._tmgr.get_default_target(),
-                target_rel_path,
-                compile,
-                compiler,
-            )
-            target_metadata["files"].append(final_target_rel_path)
+            uploads.append(PackageDeployUpload(target_rel_path, abs_source_path))
 
-        target_rel_meta_path = self.get_relative_metadata_path(
-            source_package_info.name, source_package_info.version
-        )
-        target_metadata["files"].append(target_rel_meta_path)
-        self.save_package_metadata(target_rel_meta_path, target_metadata)
-
-        return target_metadata["files"]
+        return PackageDeployRecipe(target_metadata, uploads)
 
     def get_normalized_no_deploy_packages(self) -> builtins.list[str]:
         return []

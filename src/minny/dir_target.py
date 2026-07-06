@@ -12,15 +12,15 @@ logger = getLogger(__name__)
 
 
 class DirTargetManager(TargetManager):
-    def mkdir(self, path: str) -> None:
+    def _raw_mkdir(self, path: str) -> None:
         os.mkdir(path)
 
-    def __init__(self, base_path: str):
+    def __init__(self, base_path: str, minny_cache_dir: str | None = None):
         if os.path.isfile(base_path):
             raise UserError("base_path should not be a file")
 
         self.base_path = base_path
-        super().__init__()
+        super().__init__(minny_cache_dir)
 
     def get_dir_sep(self) -> str:
         return os.path.sep
@@ -63,19 +63,19 @@ class DirTargetManager(TargetManager):
 
         return read_bytes
 
-    def write_file_ex(
+    def _raw_write_file_ex(
         self, path: str, source_fp: BinaryIO, file_size: int, callback: Callable[[int, int], None]
     ) -> int:
         return self._write_local_file_ex(path, source_fp, file_size, callback)
 
-    def remove_file_if_exists(self, path: str) -> bool:
+    def _raw_remove_file_if_exists(self, path: str) -> bool:
         if os.path.exists(path):
             os.remove(path)
             return True
         else:
             return False
 
-    def remove_dir_if_empty(self, path: str) -> bool:
+    def _raw_remove_dir_if_empty(self, path: str) -> bool:
         assert os.path.isdir(path)
         content = os.listdir(path)
         if content:
@@ -86,15 +86,15 @@ class DirTargetManager(TargetManager):
                 self._ensured_directories.remove(path)
             return True
 
-    def mkdir_in_existing_parent_exists_ok(self, path: str) -> None:
+    def _raw_mkdir_in_existing_parent_exists_ok(self, path: str) -> None:
         if not os.path.isdir(path):
             assert not os.path.exists(path)
             os.mkdir(path, 0o755)
 
-    def listdir(self, path: str) -> list[str]:
+    def _raw_listdir(self, path: str) -> list[str]:
         return os.listdir(path)
 
-    def rmdir(self, path: str) -> None:
+    def _raw_rmdir(self, path: str) -> None:
         os.rmdir(path)
 
         if path in self._ensured_directories:
@@ -117,5 +117,5 @@ class DirTargetManager(TargetManager):
 
 
 class DummyTargetManager(DirTargetManager):
-    def __init__(self):
-        super().__init__(tempfile.gettempdir())
+    def __init__(self, minny_cache_dir: str | None = None):
+        super().__init__(tempfile.gettempdir(), minny_cache_dir)

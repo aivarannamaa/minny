@@ -7,7 +7,6 @@ from tutils import create_dir_snapshot
 
 from minny.circup import CircupInstaller
 from minny.dir_target import DirTargetManager
-from minny.tracking import Tracker
 
 
 def test_no_deps_install(snapshot: dict[str, int]):
@@ -16,10 +15,9 @@ def test_no_deps_install(snapshot: dict[str, int]):
     lib_dir = os.path.join(cache_dir, "lib")
     os.makedirs(lib_dir, exist_ok=True)
 
-    tmgr = DirTargetManager(lib_dir)
-    tracker = Tracker(tmgr, cache_dir)
+    tmgr = DirTargetManager(lib_dir, cache_dir)
 
-    c = CircupInstaller(tmgr=tmgr, tracker=tracker, minny_cache_dir=cache_dir, target_dir=None)
+    c = CircupInstaller(tmgr=tmgr, minny_cache_dir=cache_dir, target_dir=None)
     c.install(["adafruit_character_lcd==3.5.3"], no_deps=True, compile=False)
     assert create_dir_snapshot(lib_dir) == snapshot
     shutil.rmtree(cache_dir)
@@ -30,11 +28,8 @@ def test_with_deps_install(snapshot: dict[str, int]):
     lib_dir = os.path.join(cache_dir, "lib")
     os.makedirs(lib_dir)
 
-    tmgr = DirTargetManager(lib_dir)
-    tracker = Tracker(tmgr, cache_dir)
     c = CircupInstaller(
-        tmgr=DirTargetManager(lib_dir),
-        tracker=tracker,
+        tmgr=DirTargetManager(lib_dir, cache_dir),
         minny_cache_dir=cache_dir,
         target_dir=None,
     )
@@ -64,10 +59,9 @@ py-modules = ["simple_circup"]
         encoding="utf-8",
     )
 
-    tmgr = DirTargetManager(str(lib_dir))
+    tmgr = DirTargetManager(str(lib_dir), str(cache_dir))
     installer = CircupInstaller(
         tmgr=tmgr,
-        tracker=Tracker(tmgr, str(cache_dir)),
         minny_cache_dir=str(cache_dir),
         target_dir=None,
     )

@@ -260,7 +260,7 @@ class BareMetalTargetManager(ProperTargetManager):
 
         return isinstance(self._connection, WebReplConnection)
 
-    def delete_recursively(self, paths):
+    def _raw_delete_recursively(self, paths):
         if not self._supports_directories():
             # micro:bit
             self._execute_without_output(
@@ -363,7 +363,7 @@ class BareMetalTargetManager(ProperTargetManager):
 
         return bytes_read
 
-    def write_file_ex(
+    def _raw_write_file_ex(
         self, path: str, source_fp: BinaryIO, file_size: int, callback: Callable[[int, int], None]
     ) -> int:
         start_time = time.time()
@@ -453,12 +453,12 @@ class BareMetalTargetManager(ProperTargetManager):
     def get_dir_sep(self) -> str:
         return "/"
 
-    def mkdir(self, path):
+    def _raw_mkdir(self, path):
         if path == "/":
             return
 
         try:
-            super().mkdir(path)
+            super()._raw_mkdir(path)
         except ManagementError as e:
             if self._contains_read_only_error(e.err):
                 self._mkdir_via_mount(path)
@@ -467,7 +467,7 @@ class BareMetalTargetManager(ProperTargetManager):
 
         self._sync_remote_filesystem()
 
-    def mkdir_in_existing_parent_exists_ok(self, path: str) -> None:
+    def _raw_mkdir_in_existing_parent_exists_ok(self, path: str) -> None:
         # TODO: check for read only fs
         self._mkdir_in_existing_parent_exists_ok_via_repl(path)
 
@@ -477,7 +477,7 @@ class BareMetalTargetManager(ProperTargetManager):
         os.mkdir(mounted_path)
         try_sync_local_filesystem()
 
-    def remove_dir_if_empty(self, path: str) -> bool:
+    def _raw_remove_dir_if_empty(self, path: str) -> bool:
         if self._read_only_filesystem:
             return self._remove_dir_if_empty_via_mount(path)
 
@@ -509,7 +509,7 @@ class BareMetalTargetManager(ProperTargetManager):
         try_sync_local_filesystem()
         return True
 
-    def remove_file_if_exists(self, path: str) -> bool:
+    def _raw_remove_file_if_exists(self, path: str) -> bool:
         if self._read_only_filesystem:
             return self._remove_file_via_mount_if_exists(path)
 

@@ -11,6 +11,7 @@ import textwrap
 import threading
 import time
 import uuid
+import zlib
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from logging import getLogger
@@ -136,8 +137,15 @@ class TargetManager(ABC):
     This requirement is related to the caching used in TargetManager.
     """
 
-    def __init__(self):
+    def __init__(self, minny_cache_dir: str | None = None):
+        from minny.tracking import Tracker
+
         self._ensured_directories = set()
+        self._tracker = Tracker(self, minny_cache_dir)
+
+    @property
+    def tracker(self):
+        return self._tracker
 
     @abstractmethod
     def get_device_id(self) -> str: ...
@@ -159,7 +167,7 @@ class TargetManager(ABC):
         new_cookie = str(uuid.uuid4())
         logger.info(f"Generated new cookie: {new_cookie}")
         path = self._get_tracking_cookie_path()
-        self.ensure_dir_and_write_file(path, new_cookie.encode(ENCODING))
+        self._raw_ensure_dir_and_write_file(path, new_cookie.encode(ENCODING))
         return new_cookie
 
     @abstractmethod
@@ -176,18 +184,6 @@ class TargetManager(ABC):
     def is_file(self, path: str) -> bool:
         stat_result = self.try_get_stat(path)
         return stat_result is not None and stat.S_ISREG(stat_result.st_mode)
-
-    @abstractmethod
-    def remove_file_if_exists(self, path: str) -> bool: ...
-
-    @abstractmethod
-    def remove_dir_if_empty(self, path: str) -> bool: ...
-
-    @abstractmethod
-    def listdir(self, path: str) -> list[str]: ...
-
-    @abstractmethod
-    def rmdir(self, path: str) -> None: ...
 
     @abstractmethod
     def get_dir_sep(self) -> str: ...
@@ -229,6 +225,12 @@ class TargetManager(ABC):
             self.ensure_dir_exists(parent)
         self.write_file(path, content)
 
+    def _raw_ensure_dir_and_write_file(self, path: str, content: bytes) -> None:
+        parent, _ = self.split_dir_and_basename(path)
+        if parent:
+            self._raw_ensure_dir_exists(parent)
+        self._raw_write_file(path, content)
+
     def ensure_dir_exists(self, path: str) -> None:
         if path in self._ensured_directories or path == "/" or path.endswith((":", ":\\")):
             return
@@ -237,6 +239,16 @@ class TargetManager(ABC):
             if parent:
                 self.ensure_dir_exists(parent)
             self.mkdir_in_existing_parent_exists_ok(path)
+            self._ensured_directories.add(path)
+
+    def _raw_ensure_dir_exists(self, path: str) -> None:
+        if path in self._ensured_directories or path == "/" or path.endswith((":", ":\\")):
+            return
+        else:
+            parent, _ = self.split_dir_and_basename(path)
+            if parent:
+                self._raw_ensure_dir_exists(parent)
+            self._raw_mkdir_in_existing_parent_exists_ok(path)
             self._ensured_directories.add(path)
 
     def _get_file_operation_block_size(self):
@@ -269,8 +281,33 @@ class TargetManager(ABC):
 
         return self.write_file_ex(path, io.BytesIO(content), len(content), callback)
 
-    @abstractmethod
+    def _raw_write_file(self, path: str, content: bytes) -> int:
+        def callback(bytes_written, total_size):
+            pass
+
+        return self._raw_write_file_ex(path, io.BytesIO(content), len(content), callback)
+
     def write_file_ex(
+        self, path: str, source_fp: BinaryIO, file_size: int, callback: Callable[[int, int], None]
+    ) -> int:
+        crc32 = 0
+
+        class CrcTrackingReader:
+            def read(self, size: int = -1) -> bytes:
+                nonlocal crc32
+                block = source_fp.read(size)
+                if block:
+                    crc32 = zlib.crc32(block, crc32)
+                return block
+
+        result = self._raw_write_file_ex(
+            path, cast(BinaryIO, CrcTrackingReader()), file_size, callback
+        )
+        self._tracker.record_file(path, crc32)
+        return result
+
+    @abstractmethod
+    def _raw_write_file_ex(
         self, path: str, source_fp: BinaryIO, file_size: int, callback: Callable[[int, int], None]
     ) -> int: ...
 
@@ -300,12 +337,52 @@ class TargetManager(ABC):
 
         return bytes_written
 
-    @abstractmethod
     def mkdir(self, path: str) -> None:
         """assumes parent path exists and path doesn't"""
+        self._raw_mkdir(path)
+        self._tracker.record_created_directory(path)
 
     @abstractmethod
-    def mkdir_in_existing_parent_exists_ok(self, path: str) -> None: ...
+    def _raw_mkdir(self, path: str) -> None:
+        """assumes parent path exists and path doesn't"""
+
+    def mkdir_in_existing_parent_exists_ok(self, path: str) -> None:
+        self._raw_mkdir_in_existing_parent_exists_ok(path)
+        self._tracker.record_created_directory(path)
+
+    @abstractmethod
+    def _raw_mkdir_in_existing_parent_exists_ok(self, path: str) -> None: ...
+
+    def remove_file_if_exists(self, path: str) -> bool:
+        removed = self._raw_remove_file_if_exists(path)
+        if removed:
+            self._tracker.record_removed_file(path)
+        return removed
+
+    @abstractmethod
+    def _raw_remove_file_if_exists(self, path: str) -> bool: ...
+
+    def remove_dir_if_empty(self, path: str) -> bool:
+        removed = self._raw_remove_dir_if_empty(path)
+        if removed:
+            self._tracker.record_removed_directory(path)
+        return removed
+
+    @abstractmethod
+    def _raw_remove_dir_if_empty(self, path: str) -> bool: ...
+
+    def listdir(self, path: str) -> list[str]:
+        return self._raw_listdir(path)
+
+    @abstractmethod
+    def _raw_listdir(self, path: str) -> list[str]: ...
+
+    def rmdir(self, path: str) -> None:
+        self._raw_rmdir(path)
+        self._tracker.record_removed_directory(path)
+
+    @abstractmethod
+    def _raw_rmdir(self, path: str) -> None: ...
 
 
 class ProperTargetManager(TargetManager, ABC):
@@ -319,9 +396,10 @@ class ProperTargetManager(TargetManager, ABC):
         clean: bool,
         interrupt: bool,
         cwd: str | None,
+        minny_cache_dir: str | None = None,
     ):
         logger.info("Constructing ProperTargetManager of type %s", type(self).__name__)
-        super().__init__()
+        super().__init__(minny_cache_dir)
         self._read_only_filesystem: bool | None = None
         self._connection: MicroPythonConnection = connection
         self._submit_mode = submit_mode or RAW_PASTE_SUBMIT_MODE
@@ -1483,12 +1561,12 @@ class ProperTargetManager(TargetManager, ABC):
     def _supports_directories(self):
         return self._using_simplified_micropython() is False
 
-    def listdir(self, path: str) -> list[str]:
+    def _raw_listdir(self, path: str) -> list[str]:
         return self._evaluate(
             f"__minny_helper.print_mgmt_value(__minny_helper.os.listdir({path!r}))"
         )
 
-    def mkdir_in_existing_parent_exists_ok(self, path: str) -> None:
+    def _raw_mkdir_in_existing_parent_exists_ok(self, path: str) -> None:
         return self._mkdir_in_existing_parent_exists_ok_via_repl(path)
 
     def _mkdir_in_existing_parent_exists_ok_via_repl(self, path: str) -> None:
@@ -1503,11 +1581,11 @@ class ProperTargetManager(TargetManager, ABC):
             )
         )
 
-    def mkdir(self, path: str) -> None:
+    def _raw_mkdir(self, path: str) -> None:
         # assumes parent path exists and path doesn't
         self._execute_without_output("__minny_helper.os.mkdir(%r)" % path)
 
-    def remove_dir_if_empty(self, path: str) -> bool:
+    def _raw_remove_dir_if_empty(self, path: str) -> bool:
         return self._remove_dir_if_empty_via_repl(path)
 
     def _remove_dir_if_empty_via_repl(self, path: str) -> bool:
@@ -1523,7 +1601,7 @@ class ProperTargetManager(TargetManager, ABC):
             else:
                 raise
 
-    def remove_file_if_exists(self, path: str) -> bool:
+    def _raw_remove_file_if_exists(self, path: str) -> bool:
         return self.remove_file_if_exists_via_repl(path)
 
     def remove_file_if_exists_via_repl(self, path: str) -> bool:
@@ -1536,7 +1614,7 @@ class ProperTargetManager(TargetManager, ABC):
             else:
                 raise
 
-    def rmdir(self, path: str) -> None:
+    def _raw_rmdir(self, path: str) -> None:
         self._execute_without_output(
             f"__minny_helper.print_mgmt_value(__minny_helper.os.rmdir({path!r}))"
         )
@@ -1612,7 +1690,7 @@ class ProperTargetManager(TargetManager, ABC):
         else:
             return 1024
 
-    def write_file_ex(
+    def _raw_write_file_ex(
         self, path: str, source_fp: BinaryIO, file_size: int, callback: Callable[[int, int], None]
     ) -> int:
         start_time = time.time()
@@ -1742,6 +1820,11 @@ class ProperTargetManager(TargetManager, ABC):
         return bytes_sent
 
     def delete_recursively(self, paths: list[str]) -> None:
+        self._raw_delete_recursively(paths)
+        for path in paths:
+            self._tracker.record_removed_directory(path)
+
+    def _raw_delete_recursively(self, paths: list[str]) -> None:
         self._delete_recursively_via_repl(paths)
 
     def _delete_recursively_via_repl(self, paths: list[str]) -> None:
@@ -1964,7 +2047,7 @@ def ends_overlap(left, right) -> int:
 
 
 def create_target_manager(
-    port: str | None, mount: str | None, dir: str | None, **kw
+    port: str | None, mount: str | None, dir: str | None, minny_cache_dir: str | None = None, **kw
 ) -> TargetManager:
     if port is None and mount is None and dir is None:
         candidates = _infer_possible_targets()
@@ -1992,11 +2075,12 @@ def create_target_manager(
             clean=False,
             cwd=None,
             interrupt=True,
+            minny_cache_dir=minny_cache_dir,
         )
     elif dir:
         from minny.dir_target import DirTargetManager
 
-        return DirTargetManager(dir)
+        return DirTargetManager(dir, minny_cache_dir)
     else:
         assert mount is not None
         # TODO look up port

@@ -6,7 +6,6 @@ import traceback
 from minny.common import ManagementError, UserError, get_default_minny_cache_dir
 from minny.compiling import Compiler
 from minny.target import TargetManager, create_target_manager
-from minny.tracking import Tracker
 from minny.util import find_enclosing_project
 
 logger = logging.getLogger("minny")
@@ -51,27 +50,26 @@ def main(raw_args: list[str] | None = None) -> int:
         if args.main_command in ["cache", "init", "add", "remove", "sync"]:
             from minny.dir_target import DummyTargetManager
 
-            tmgr = DummyTargetManager()
+            tmgr = DummyTargetManager(cache_dir)
         else:
-            tmgr = create_target_manager(**args_dict)
+            tmgr = create_target_manager(minny_cache_dir=cache_dir, **args_dict)
 
         target_dir = args_dict.get("lib_dir", None)
-        tracker = Tracker(tmgr, minny_cache_dir=cache_dir)
 
         if args.main_command == "circup":
-            command_handler = CircupInstaller(tmgr, tracker, target_dir, cache_dir)
+            command_handler = CircupInstaller(tmgr, target_dir, cache_dir)
             method = getattr(command_handler, args.command)
         elif args.main_command == "mip":
-            command_handler = MipInstaller(tmgr, tracker, target_dir, cache_dir)
+            command_handler = MipInstaller(tmgr, target_dir, cache_dir)
             method = getattr(command_handler, args.command)
         elif args.main_command == "pip":
-            command_handler = PipInstaller(tmgr, tracker, target_dir, cache_dir)
+            command_handler = PipInstaller(tmgr, target_dir, cache_dir)
             method = getattr(command_handler, args.command)
         else:
             project_dir = args.project or find_enclosing_project()
             assert project_dir is not None
             compiler = Compiler(tmgr, args_dict.get("mpy_cross", None), cache_dir)
-            command_handler = ProjectManager(project_dir, tmgr, tracker, compiler, cache_dir)
+            command_handler = ProjectManager(project_dir, tmgr, compiler, cache_dir)
             method = getattr(command_handler, args.main_command)
 
         method(**args_dict)

@@ -3,14 +3,12 @@ from pathlib import Path
 
 from minny.dir_target import DirTargetManager
 from minny.pip import PipInstaller
-from minny.tracking import Tracker
 
 
 def create_pip_installer(cache_dir, lib_dir):
-    tmgr = DirTargetManager(str(lib_dir))
+    tmgr = DirTargetManager(str(lib_dir), str(cache_dir))
     return PipInstaller(
         tmgr=tmgr,
-        tracker=Tracker(tmgr, str(cache_dir)),
         target_dir=None,
         minny_cache_dir=str(cache_dir),
     )

@@ -5,7 +5,6 @@ from pathlib import Path
 from minny.compiling import Compiler
 from minny.dir_target import DummyTargetManager
 from minny.project import ProjectManager
-from minny.tracking import Tracker
 
 # Test constants
 DUMMY_FILES = [
@@ -47,10 +46,9 @@ def test_sync_command(snapshot):
     conflicting_file.write_text(CONFLICTING_DUMMY_CONTENT)
 
     cache_dir = tempfile.mkdtemp()
-    tmgr = DummyTargetManager()
+    tmgr = DummyTargetManager(cache_dir)
     compiler = Compiler(tmgr, None, cache_dir)
-    tracker = Tracker(tmgr, minny_cache_dir=cache_dir)
-    project_manager = ProjectManager(str(project_dir), tmgr, tracker, compiler, cache_dir)
+    project_manager = ProjectManager(str(project_dir), tmgr, compiler, cache_dir)
     project_manager.sync()
 
     # Verify lib directory was created

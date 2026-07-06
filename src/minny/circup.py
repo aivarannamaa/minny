@@ -30,7 +30,6 @@ from minny.installer import (
 )
 from minny.settings import SettingsReader
 from minny.target import TargetManager
-from minny.tracking import Tracker
 from minny.util import (
     download_bytes,
     get_latest_github_release_tag,
@@ -81,13 +80,12 @@ class CircupInstaller(Installer):
     def __init__(
         self,
         tmgr: TargetManager,
-        tracker: Tracker,
         target_dir: str | None,
         minny_cache_dir: str | None = None,
     ):
         if minny_cache_dir is None:
             minny_cache_dir = get_default_minny_cache_dir()
-        super().__init__(tmgr, tracker, target_dir, minny_cache_dir)
+        super().__init__(tmgr, target_dir, minny_cache_dir)
         self._cache_dir: str = os.path.join(minny_cache_dir, "circup")
         os.makedirs(self._cache_dir, exist_ok=True)
         self._target_dir = self._tmgr.get_default_target()

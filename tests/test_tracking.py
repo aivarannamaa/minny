@@ -1,10 +1,10 @@
 import json
+import zlib
 
 from minny.dir_target import DirTargetManager
-from minny.tracking import Tracker
 
 
-def test_new_tracking_cookie_does_not_record_folder_inventory_implicitly(tmp_path):
+def test_new_tracking_cookie_does_not_record_directory_info_implicitly(tmp_path):
     cache_dir = tmp_path / "cache"
     target_dir = tmp_path / "target"
     cache_dir.mkdir()
@@ -14,11 +14,11 @@ def test_new_tracking_cookie_does_not_record_folder_inventory_implicitly(tmp_pat
     nested_dir.mkdir()
     (nested_dir / "data.txt").write_text("data\n", encoding="utf-8")
 
-    tmgr = DirTargetManager(str(target_dir))
-    tracker = Tracker(tmgr, str(cache_dir))
+    tmgr = DirTargetManager(str(target_dir), str(cache_dir))
+    tracker = tmgr.tracker
     new_file_path = tmgr.join_path(tmgr.get_default_target(), "new.py")
 
-    tracker.smart_write_to_tracked_file(new_file_path, b"NEW = True\n")
+    tracker.record_file(new_file_path, zlib.crc32(b"NEW = True\n"))
 
     cookie = tmgr.get_existing_tracking_cookie()
     assert cookie is not None
@@ -34,39 +34,53 @@ def test_new_tracking_cookie_does_not_record_folder_inventory_implicitly(tmp_pat
     assert "tracked_packages" not in tracking_data
 
 
-def test_folder_inventory_records_child_kinds(tmp_path):
+def test_record_file_records_source_info(tmp_path):
     cache_dir = tmp_path / "cache"
     target_dir = tmp_path / "target"
     cache_dir.mkdir()
     target_dir.mkdir()
-    (target_dir / "existing.py").write_text("EXISTING = True\n", encoding="utf-8")
-    nested_dir = target_dir / "nested"
-    nested_dir.mkdir()
-    (nested_dir / "data.txt").write_text("data\n", encoding="utf-8")
+    source_path = tmp_path / "source.py"
+    source_path.write_text("VALUE = 1\n", encoding="utf-8")
 
-    tmgr = DirTargetManager(str(target_dir))
-    tracker = Tracker(tmgr, str(cache_dir))
-    tracker.record_folder_inventory(tmgr.get_default_target())
+    tmgr = DirTargetManager(str(target_dir), str(cache_dir))
+    tracker = tmgr.tracker
+    target_path = tmgr.join_path(tmgr.get_default_target(), "written.mpy")
 
-    assert tracker._tracked_folders[tmgr.get_default_target()] == {
-        "existing.py": "file",
-        "nested": "dir",
-    }
+    tracker.record_file(
+        target_path,
+        zlib.crc32(b"compiled"),
+        source_abs_path=str(source_path),
+        module_format="mpy-test",
+    )
+
+    tracked_file_info = tracker.get_tracked_file_info(target_path)
+    assert tracked_file_info is not None
+    assert tracked_file_info["source_path"] == str(source_path)
+    assert tracked_file_info["source_mtimte"] == source_path.stat().st_mtime
+    assert tracked_file_info["module_format"] == "mpy-test"
 
 
-def test_tracked_folder_inventory_is_updated_by_file_writes_and_removals(tmp_path):
+def test_record_file_updates_source_info_when_crc_already_matches(tmp_path):
     cache_dir = tmp_path / "cache"
     target_dir = tmp_path / "target"
     cache_dir.mkdir()
     target_dir.mkdir()
+    source_path = tmp_path / "source.py"
+    source_path.write_text("VALUE = 1\n", encoding="utf-8")
 
-    tmgr = DirTargetManager(str(target_dir))
-    tracker = Tracker(tmgr, str(cache_dir))
-    tracker.record_folder_inventory(tmgr.get_default_target())
+    tmgr = DirTargetManager(str(target_dir), str(cache_dir))
+    tracker = tmgr.tracker
+    target_path = tmgr.join_path(tmgr.get_default_target(), "written.mpy")
 
-    target_path = tmgr.join_path(tmgr.get_default_target(), "written.py")
-    tracker.smart_write_to_tracked_file(target_path, b"VALUE = 1\n")
-    assert tracker._tracked_folders[tmgr.get_default_target()]["written.py"] == "file"
+    tracker.record_file(target_path, zlib.crc32(b"compiled"))
+    tracker.record_file(
+        target_path,
+        zlib.crc32(b"compiled"),
+        source_abs_path=str(source_path),
+        module_format="mpy-test",
+    )
 
-    tracker.remove_file_if_exists(target_path)
-    assert "written.py" not in tracker._tracked_folders[tmgr.get_default_target()]
+    tracked_file_info = tracker.get_tracked_file_info(target_path)
+    assert tracked_file_info is not None
+    assert tracked_file_info["source_path"] == str(source_path)
+    assert tracked_file_info["module_format"] == "mpy-test"

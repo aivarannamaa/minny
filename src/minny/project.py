@@ -2,6 +2,8 @@ import fnmatch
 import hashlib
 import json
 import os.path
+import pathlib
+import zlib
 from logging import getLogger
 from typing import Any, TypedDict
 
@@ -9,12 +11,11 @@ from minny import get_default_minny_cache_dir
 from minny.circup import CircupInstaller
 from minny.compiling import Compiler
 from minny.dir_target import DirTargetManager
-from minny.installer import Installer, PackageMetadata
+from minny.installer import Installer, PackageInstallationInfo, PackageMetadata
 from minny.mip import MipInstaller
 from minny.pip import PipInstaller
 from minny.settings import load_minny_settings_from_pyproject_toml
 from minny.target import TargetManager
-from minny.tracking import DummyTracker, Tracker
 from minny.util import parse_json_file, parse_toml_file
 
 logger = getLogger(__name__)
@@ -36,17 +37,14 @@ class ProjectManager:
         self,
         project_dir: str,
         tmgr: TargetManager,
-        tracker: Tracker,
         compiler: Compiler,
         minny_cache_dir: str | None = None,
     ):
         self._project_dir = project_dir
         self._lib_dir = os.path.join(self._project_dir, ".minny", "lib")
-        self._lib_dir_mgr = DirTargetManager(self._lib_dir)
         self._minny_cache_dir = minny_cache_dir or get_default_minny_cache_dir()
+        self._lib_dir_mgr = DirTargetManager(self._lib_dir, self._minny_cache_dir)
         self._tmgr = tmgr
-        self._target_tracker = tracker
-        self._dummy_tracker = DummyTracker(self._lib_dir_mgr)
         self._compiler = compiler
         self._pyproject_toml_path = os.path.join(self._project_dir, "pyproject.toml")
         self._pyproject_toml: dict[str, Any] | None = (
@@ -122,7 +120,7 @@ class ProjectManager:
         espec_strings: list[str],
         last_sync_state: _InstallerSyncState | None,
     ) -> _InstallerSyncState:
-        installer = self._create_installer(installer_name, self._lib_dir_mgr, self._dummy_tracker)
+        installer = self._create_installer(installer_name, self._lib_dir_mgr)
         especs = [installer.parse_extended_spec(s) for s in espec_strings]
 
         if last_sync_state is not None:
@@ -231,19 +229,14 @@ class ProjectManager:
             logger.debug(f"Deploying to {destination}")
 
             for installer_type in ["pip", "mip", "circup"]:
-                source_installer = self._create_installer(
-                    installer_type, self._lib_dir_mgr, self._dummy_tracker
-                )
-                target_installer = self._create_installer(
-                    installer_type, self._tmgr, self._target_tracker, destination
-                )
+                source_installer = self._create_installer(installer_type, self._lib_dir_mgr)
                 synced_packages_infos = source_installer.get_installed_package_infos()
                 synced_package_names = list(synced_packages_infos.keys())
                 packages_to_deploy = self._filter_package_names(
                     synced_package_names,
                     deploy_spec.include,
                     deploy_spec.exclude,
-                    target_installer.get_normalized_no_deploy_packages(),
+                    source_installer.get_normalized_no_deploy_packages(),
                 )
                 packages_to_compile = self._filter_package_names(
                     packages_to_deploy, deploy_spec.compile, deploy_spec.no_compile
@@ -252,12 +245,14 @@ class ProjectManager:
                 for canonical_name in sorted(packages_to_deploy):
                     source_info = synced_packages_infos[canonical_name]
                     source_meta = source_installer.load_package_metadata(source_info)
-                    target_installer.smart_deploy_or_replace_locally_installed_package(
-                        source_dir=self._lib_dir,
-                        source_package_info=source_info,
-                        source_package_meta=source_meta,
-                        compile=canonical_name in packages_to_compile,
-                        compiler=compiler,
+                    self._deploy_locally_installed_package(
+                        source_installer,
+                        source_info,
+                        source_meta,
+                        self._lib_dir,
+                        destination,
+                        canonical_name in packages_to_compile,
+                        compiler,
                     )
 
     def _filter_package_names(
@@ -295,6 +290,105 @@ class ProjectManager:
     def _deploy_files(self, compiler: Compiler, except_main: bool):
         pass
 
+    def _deploy_locally_installed_package(
+        self,
+        source_installer: Installer,
+        source_package_info: PackageInstallationInfo,
+        source_package_meta: PackageMetadata,
+        source_dir: str,
+        destination: str,
+        compile: bool,
+        compiler: Compiler,
+    ) -> list[str]:
+        logger.info(f"Start deploying package {source_package_info}")
+        recipe = source_installer.create_deploy_recipe(
+            source_dir=source_dir,
+            source_package_info=source_package_info,
+            source_package_meta=source_package_meta,
+        )
+
+        deployed_files = []
+        for upload in recipe.uploads:
+            final_target_rel_path = self._smart_deploy_file(
+                upload.source_abs_path,
+                destination,
+                upload.target_rel_path,
+                compile,
+                compiler,
+            )
+            deployed_files.append(final_target_rel_path)
+
+        rel_metadata_path = source_installer.get_relative_metadata_path(
+            source_package_info.name, source_package_info.version
+        )
+        deployed_files.append(rel_metadata_path)
+        recipe.metadata["files"] = deployed_files
+        self._tmgr.ensure_dir_and_write_file(
+            self._tmgr.join_path(destination, rel_metadata_path),
+            source_installer.compile_package_metadata(recipe.metadata),
+        )
+        return deployed_files
+
+    def _smart_deploy_file(
+        self,
+        source_abs_path: str,
+        target_base_path: str,
+        target_rel_path: str,
+        compile: bool,
+        compiler: Compiler,
+    ) -> str:
+        module_format: str | None = None
+        original_target_rel_path = target_rel_path
+        assert "\\" not in original_target_rel_path
+
+        if target_rel_path.endswith(".py"):
+            if compile:
+                target_rel_path = target_rel_path[:-3] + ".mpy"
+                module_format = compiler.get_module_format()
+            else:
+                module_format = "py"
+
+        target_path = self._tmgr.join_path(target_base_path, target_rel_path)
+        file_info = self._tmgr.tracker.get_tracked_file_info(target_path)
+        source_mtime = os.stat(source_abs_path).st_mtime
+
+        if (
+            file_info is not None
+            and file_info.get("source_path") == source_abs_path
+            and file_info.get("source_mtimte") == source_mtime
+            and file_info.get("module_format") == module_format
+        ):
+            logger.debug(
+                f"Skip upload '{source_abs_path}' => '{target_path}' (recorded attributes not changed)"
+            )
+            return target_rel_path
+
+        if compile:
+            content = compiler.compile_to_bytes(source_abs_path, original_target_rel_path)
+        else:
+            content = pathlib.Path(source_abs_path).read_bytes()
+
+        source_crc32 = zlib.crc32(content)
+        if file_info is None or file_info["crc32"] != source_crc32:
+            actual_target_crc32 = self._tmgr.try_get_crc32(target_path)
+            if actual_target_crc32 == source_crc32:
+                logger.debug(f"Skip writing to '{target_path}' (actual target crc32 not changed)")
+            else:
+                logger.debug(f"CRC-s don't match: {actual_target_crc32} vs {source_crc32}")
+                logger.info(f"Writing {len(content)} bytes to '{target_path}')")
+                print(f"Writing to {target_path}")
+                self._tmgr.ensure_dir_and_write_file(target_path, content)
+        else:
+            logger.debug(f"Skip writing to '{target_path}' (recorded crc32 not changed)")
+
+        self._tmgr.tracker.record_file(
+            target_path,
+            source_crc32,
+            source_abs_path=source_abs_path,
+            module_format=module_format,
+        )
+        return target_rel_path
+
     def _get_current_package_installer_type(self) -> str:
         """Determine which installer should handle the current package.
 
@@ -326,17 +420,16 @@ class ProjectManager:
         self,
         installer_type: str,
         tmgr: TargetManager,
-        tracker: Tracker,
         target_dir: str | None = None,
     ) -> Installer:
         """Create an installer instance of the specified type for the given target."""
         match installer_type:
             case "pip":
-                return PipInstaller(tmgr, tracker, target_dir, self._minny_cache_dir)
+                return PipInstaller(tmgr, target_dir, self._minny_cache_dir)
             case "mip":
-                return MipInstaller(tmgr, tracker, target_dir, self._minny_cache_dir)
+                return MipInstaller(tmgr, target_dir, self._minny_cache_dir)
             case "circup":
-                return CircupInstaller(tmgr, tracker, target_dir, self._minny_cache_dir)
+                return CircupInstaller(tmgr, target_dir, self._minny_cache_dir)
             case _:
                 raise ValueError(f"Unknown installer type: {installer_type}")
 

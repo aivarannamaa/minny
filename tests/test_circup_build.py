@@ -13,7 +13,6 @@ import pytest
 
 from minny.circup import CircupBuilder, CircupInstaller
 from minny.dir_target import DirTargetManager
-from minny.tracking import Tracker
 from minny.util import get_latest_github_release_tag
 
 logger = getLogger(__name__)
@@ -77,11 +76,8 @@ def test_folders_are_equal():
 @pytest.mark.slow
 def test_build_matches_bundle():
     cache_dir = tempfile.mkdtemp()
-    tmgr = DirTargetManager(cache_dir)
-    tracker = Tracker(tmgr, cache_dir)
     c = CircupInstaller(
-        tmgr=DirTargetManager(cache_dir),
-        tracker=tracker,
+        tmgr=DirTargetManager(cache_dir, cache_dir),
         minny_cache_dir=cache_dir,
         target_dir=None,
     )

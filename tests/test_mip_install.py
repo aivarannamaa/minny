@@ -4,7 +4,6 @@ import os
 import minny.mip
 from minny.dir_target import DirTargetManager
 from minny.mip import MipInstaller
-from minny.tracking import Tracker
 
 
 def test_local_mip_package_with_dependency(tmp_path):
@@ -39,10 +38,9 @@ def test_local_mip_package_with_dependency(tmp_path):
         encoding="utf-8",
     )
 
-    tmgr = DirTargetManager(str(lib_dir))
+    tmgr = DirTargetManager(str(lib_dir), str(cache_dir))
     installer = MipInstaller(
         tmgr=tmgr,
-        tracker=Tracker(tmgr, str(cache_dir)),
         target_dir=None,
         minny_cache_dir=str(cache_dir),
     )
@@ -79,10 +77,9 @@ def test_editable_local_mip_package_uses_package_json_mapping(tmp_path):
         encoding="utf-8",
     )
 
-    tmgr = DirTargetManager(str(lib_dir))
+    tmgr = DirTargetManager(str(lib_dir), str(cache_dir))
     installer = MipInstaller(
         tmgr=tmgr,
-        tracker=Tracker(tmgr, str(cache_dir)),
         target_dir=None,
         minny_cache_dir=str(cache_dir),
     )
@@ -97,7 +94,7 @@ def test_editable_local_mip_package_uses_package_json_mapping(tmp_path):
     assert meta["editable"]["files"] == {"target.py": "source.py"}
 
 
-def test_direct_mip_file_does_not_track_temp_source(tmp_path):
+def test_direct_mip_file_records_plain_write(tmp_path):
     cache_dir = tmp_path / "cache"
     lib_dir = tmp_path / "lib"
     cache_dir.mkdir()
@@ -105,11 +102,9 @@ def test_direct_mip_file_does_not_track_temp_source(tmp_path):
     source_file = tmp_path / "single.py"
     source_file.write_text("VALUE = 42\n", encoding="utf-8")
 
-    tmgr = DirTargetManager(str(lib_dir))
-    tracker = Tracker(tmgr, str(cache_dir))
+    tmgr = DirTargetManager(str(lib_dir), str(cache_dir))
     installer = MipInstaller(
         tmgr=tmgr,
-        tracker=tracker,
         target_dir=None,
         minny_cache_dir=str(cache_dir),
     )
@@ -117,9 +112,11 @@ def test_direct_mip_file_does_not_track_temp_source(tmp_path):
     installer.install([str(source_file)], compile=False)
 
     target_path = tmgr.join_path(tmgr.get_default_target(), "single.py")
-    assert "crc32" in tracker._tracked_files[target_path]
-    assert "source_path" not in tracker._tracked_files[target_path]
-    assert "source_mtimte" not in tracker._tracked_files[target_path]
+    tracked_file_info = tmgr.tracker.get_tracked_file_info(target_path)
+    assert (lib_dir / "single.py").read_text(encoding="utf-8") == "VALUE = 42\n"
+    assert tracked_file_info is not None
+    assert "crc32" in tracked_file_info
+    assert "source_path" not in tracked_file_info
 
 
 def test_mip_latest_version_uses_index_latest_json(tmp_path, monkeypatch):
@@ -135,10 +132,9 @@ def test_mip_latest_version_uses_index_latest_json(tmp_path, monkeypatch):
 
     monkeypatch.setattr(minny.mip, "download_and_parse_json", mock_download_and_parse_json)
 
-    tmgr = DirTargetManager(str(lib_dir))
+    tmgr = DirTargetManager(str(lib_dir), str(cache_dir))
     installer = MipInstaller(
         tmgr=tmgr,
-        tracker=Tracker(tmgr, str(cache_dir)),
         target_dir=None,
         minny_cache_dir=str(cache_dir),
     )
