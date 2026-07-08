@@ -15,6 +15,10 @@ def test_complex(snapshot):
     assert load_from_file("complex.toml") == snapshot
 
 
+def test_current_package_installer_belongs_to_minny_table():
+    assert load_from_file("current-package-installer.toml").current_package_installer == "pip"
+
+
 def test_deploy_files_not_array_raises():
     with pytest.raises(UserError, match=r"tool\.minny\.deploy\.files must be an array"):
         load_from_file("deploy-files-not-array.toml")

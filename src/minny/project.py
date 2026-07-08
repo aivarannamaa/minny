@@ -14,7 +14,7 @@ from minny.dir_target import DirTargetManager
 from minny.installer import Installer, PackageInstallationInfo, PackageMetadata
 from minny.mip import MipInstaller
 from minny.pip import PipInstaller
-from minny.settings import load_minny_settings_from_pyproject_toml
+from minny.settings import MinnySettings, load_minny_settings_from_pyproject_toml
 from minny.target import TargetManager
 from minny.util import parse_json_file, parse_toml_file
 
@@ -37,7 +37,6 @@ class ProjectManager:
         self,
         project_dir: str,
         tmgr: TargetManager,
-        compiler: Compiler,
         minny_cache_dir: str | None = None,
     ):
         self._project_dir = project_dir
@@ -45,7 +44,6 @@ class ProjectManager:
         self._minny_cache_dir = minny_cache_dir or get_default_minny_cache_dir()
         self._lib_dir_mgr = DirTargetManager(self._lib_dir, self._minny_cache_dir)
         self._tmgr = tmgr
-        self._compiler = compiler
         self._pyproject_toml_path = os.path.join(self._project_dir, "pyproject.toml")
         self._pyproject_toml: dict[str, Any] | None = (
             parse_toml_file(self._pyproject_toml_path)
@@ -64,22 +62,61 @@ class ProjectManager:
 
     def sync(self, **kwargs):
         print("syncing")
-        self._sync_dependencies()
+        self._create_syncer().sync()
 
     def deploy(self, mpy_cross_path: str | None = None, except_main: bool = False, **kwargs):
-        self._deploy(mpy_cross_path, except_main=except_main)
+        self._sync_and_deploy(mpy_cross_path, except_main=except_main)
 
     def run(self, script_path: str, mpy_cross_path: str | None, **kwargs):
-        self._deploy(mpy_cross_path, except_main=True)
+        self._sync_and_deploy(mpy_cross_path, except_main=True)
         # TODO: self._tmgr.exec()
 
-    def _deploy(self, mpy_cross_path: str | None, except_main: bool):
+    def _sync_and_deploy(self, mpy_cross_path: str | None, except_main: bool):
+        self._create_syncer().sync()
         compiler = Compiler(self._tmgr, mpy_cross_path, self._minny_cache_dir)
-        self._sync_dependencies()
-        self._deploy_packages(compiler)
-        self._deploy_files(compiler, except_main=False)
+        self._create_deployer().deploy(compiler, except_main=except_main)
 
-    def _sync_dependencies(self):
+    def _create_syncer(self) -> "ProjectSyncer":
+        return ProjectSyncer(
+            self._project_dir,
+            self._lib_dir,
+            self._lib_dir_mgr,
+            self._minny_cache_dir,
+            self._minny_settings,
+            self._pyproject_toml,
+            self._package_json,
+        )
+
+    def _create_deployer(self) -> "ProjectDeployer":
+        return ProjectDeployer(
+            self._lib_dir,
+            self._lib_dir_mgr,
+            self._minny_cache_dir,
+            self._minny_settings,
+            self._tmgr,
+        )
+
+
+class ProjectSyncer:
+    def __init__(
+        self,
+        project_dir: str,
+        lib_dir: str,
+        lib_dir_mgr: DirTargetManager,
+        minny_cache_dir: str,
+        minny_settings: MinnySettings,
+        pyproject_toml: dict[str, Any] | None,
+        package_json: dict[str, Any] | None,
+    ):
+        self._project_dir = project_dir
+        self._lib_dir = lib_dir
+        self._lib_dir_mgr = lib_dir_mgr
+        self._minny_cache_dir = minny_cache_dir
+        self._minny_settings = minny_settings
+        self._pyproject_toml = pyproject_toml
+        self._package_json = package_json
+
+    def sync(self):
         os.makedirs(self._lib_dir, exist_ok=True)
 
         current_package_installer_name = self._get_current_package_installer_type()
@@ -120,7 +157,9 @@ class ProjectManager:
         espec_strings: list[str],
         last_sync_state: _InstallerSyncState | None,
     ) -> _InstallerSyncState:
-        installer = self._create_installer(installer_name, self._lib_dir_mgr)
+        installer = create_installer_by_name(
+            installer_name, self._lib_dir_mgr, self._minny_cache_dir
+        )
         especs = [installer.parse_extended_spec(s) for s in espec_strings]
 
         if last_sync_state is not None:
@@ -221,6 +260,90 @@ class ProjectManager:
             if not os.listdir(dirpath):
                 os.rmdir(dirpath)
 
+    def _get_current_package_installer_type(self) -> str:
+        """Determine which installer should handle the current package.
+
+        The current package's installer will receive the project directory path,
+        allowing it to read and install package dependencies (project.dependencies,
+        circup_circup, package.json dependencies, etc.).
+
+        Returns:
+            Installer type: "pip", "mip", "circup", or "none"
+        """
+        if self._minny_settings.current_package_installer != "auto":
+            return self._minny_settings.current_package_installer
+
+        if self._package_json is not None:
+            return "mip"
+
+        if self._pyproject_toml is None:
+            return "none"
+
+        if self._pyproject_toml.get("circup", {}).get("circup_dependencies", None) is not None:
+            return "circup"
+
+        if self._pyproject_toml.get("project", {}).get("name", None) is not None:
+            return "pip"
+
+        return "none"
+
+    def _load_last_sync_states(self) -> dict[str, _InstallerSyncState]:
+        path = self._get_project_cache_path()
+        if os.path.exists(path):
+            assert os.path.isfile(path), f"{path} is not a file"
+            info: _CachedProjectInfo = parse_json_file(path)
+            if not os.path.samefile(info["project_path"], self._project_dir):
+                logger.warning("Cached project info has different project path")  # hash collision?
+                return {}
+            if info["lib_dir"] != self._lib_dir:
+                logger.info("Lib dir has changed since last sync")
+                return {}
+
+            return info["last_sync_states"]
+        else:
+            logger.debug("Last sync info not found")
+            return {}
+
+    def _save_last_sync_states(self, last_sync_states: dict[str, _InstallerSyncState]) -> None:
+        path = self._get_project_cache_path()
+        logger.debug(f"Saving project info to '{path}'")
+        info = _CachedProjectInfo(
+            project_path=self._project_dir, lib_dir=self._lib_dir, last_sync_states=last_sync_states
+        )
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, mode="wt", encoding="utf-8") as fp:
+            json.dump(
+                info,
+                fp,
+            )
+
+    def _get_project_cache_path(self) -> str:
+        canonical_project_path = os.path.realpath(
+            os.path.normpath(os.path.normcase(self._project_dir))
+        )
+        project_hash = hashlib.sha256(canonical_project_path.encode("utf-8")).hexdigest()[:20]
+        return os.path.join(self._minny_cache_dir, "projects", project_hash + ".json")
+
+
+class ProjectDeployer:
+    def __init__(
+        self,
+        lib_dir: str,
+        lib_dir_mgr: DirTargetManager,
+        minny_cache_dir: str,
+        minny_settings: MinnySettings,
+        tmgr: TargetManager,
+    ):
+        self._lib_dir = lib_dir
+        self._lib_dir_mgr = lib_dir_mgr
+        self._minny_cache_dir = minny_cache_dir
+        self._minny_settings = minny_settings
+        self._tmgr = tmgr
+
+    def deploy(self, compiler: Compiler, except_main: bool):
+        self._deploy_packages(compiler)
+        self._deploy_files(compiler, except_main=except_main)
+
     def _deploy_packages(self, compiler: Compiler) -> None:
         for deploy_spec in self._minny_settings.deploy.packages:
             destination = deploy_spec.destination
@@ -229,7 +352,9 @@ class ProjectManager:
             logger.debug(f"Deploying to {destination}")
 
             for installer_type in ["pip", "mip", "circup"]:
-                source_installer = self._create_installer(installer_type, self._lib_dir_mgr)
+                source_installer = create_installer_by_name(
+                    installer_type, self._lib_dir_mgr, self._minny_cache_dir
+                )
                 synced_packages_infos = source_installer.get_installed_package_infos()
                 synced_package_names = list(synced_packages_infos.keys())
                 packages_to_deploy = self._filter_package_names(
@@ -389,83 +514,20 @@ class ProjectManager:
         )
         return target_rel_path
 
-    def _get_current_package_installer_type(self) -> str:
-        """Determine which installer should handle the current package.
 
-        The current package's installer will receive the project directory path,
-        allowing it to read and install package dependencies (project.dependencies,
-        circup_circup, package.json dependencies, etc.).
-
-        Returns:
-            Installer type: "pip", "mip", "circup", or "none"
-        """
-        if self._minny_settings.deploy.current_package_installer != "auto":
-            return self._minny_settings.deploy.current_package_installer
-
-        if self._package_json is not None:
-            return "mip"
-
-        if self._pyproject_toml is None:
-            return "none"
-
-        if self._pyproject_toml.get("circup", {}).get("circup_dependencies", None) is not None:
-            return "circup"
-
-        if self._pyproject_toml.get("project", {}).get("name", None) is not None:
-            return "pip"
-
-        return "none"
-
-    def _create_installer(
-        self,
-        installer_type: str,
-        tmgr: TargetManager,
-        target_dir: str | None = None,
-    ) -> Installer:
-        """Create an installer instance of the specified type for the given target."""
-        match installer_type:
-            case "pip":
-                return PipInstaller(tmgr, target_dir, self._minny_cache_dir)
-            case "mip":
-                return MipInstaller(tmgr, target_dir, self._minny_cache_dir)
-            case "circup":
-                return CircupInstaller(tmgr, target_dir, self._minny_cache_dir)
-            case _:
-                raise ValueError(f"Unknown installer type: {installer_type}")
-
-    def _load_last_sync_states(self) -> dict[str, _InstallerSyncState]:
-        path = self._get_project_cache_path()
-        if os.path.exists(path):
-            assert os.path.isfile(path), f"{path} is not a file"
-            info: _CachedProjectInfo = parse_json_file(path)
-            if not os.path.samefile(info["project_path"], self._project_dir):
-                logger.warning("Cached project info has different project path")  # hash collision?
-                return {}
-            if info["lib_dir"] != self._lib_dir:
-                logger.info("Lib dir has changed since last sync")
-                return {}
-
-            return info["last_sync_states"]
-        else:
-            logger.debug("Last sync info not found")
-            return {}
-
-    def _save_last_sync_states(self, last_sync_states: dict[str, _InstallerSyncState]) -> None:
-        path = self._get_project_cache_path()
-        logger.debug(f"Saving project info to '{path}'")
-        info = _CachedProjectInfo(
-            project_path=self._project_dir, lib_dir=self._lib_dir, last_sync_states=last_sync_states
-        )
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, mode="wt", encoding="utf-8") as fp:
-            json.dump(
-                info,
-                fp,
-            )
-
-    def _get_project_cache_path(self) -> str:
-        canonical_project_path = os.path.realpath(
-            os.path.normpath(os.path.normcase(self._project_dir))
-        )
-        project_hash = hashlib.sha256(canonical_project_path.encode("utf-8")).hexdigest()[:20]
-        return os.path.join(self._minny_cache_dir, "projects", project_hash + ".json")
+def create_installer_by_name(
+    installer_type: str,
+    tmgr: TargetManager,
+    minny_cache_dir: str,
+    target_dir: str | None = None,
+) -> Installer:
+    """Create an installer instance of the specified type for the given target."""
+    match installer_type:
+        case "pip":
+            return PipInstaller(tmgr, target_dir, minny_cache_dir)
+        case "mip":
+            return MipInstaller(tmgr, target_dir, minny_cache_dir)
+        case "circup":
+            return CircupInstaller(tmgr, target_dir, minny_cache_dir)
+        case _:
+            raise ValueError(f"Unknown installer type: {installer_type}")

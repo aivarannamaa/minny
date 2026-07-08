@@ -1,0 +1,2 @@
+[tool.minny]
+current-package-installer = "pip"

@@ -4,7 +4,6 @@ from pathlib import Path
 
 from tutils import create_dir_snapshot, prepare_tests_cache_dir
 
-from minny.compiling import Compiler
 from minny.dir_target import DirTargetManager
 from minny.project import ProjectManager
 
@@ -21,8 +20,7 @@ def test_basic_deploy(snapshot: dict[str, int]):
         shutil.rmtree(actual_lib_dir)
 
     tmgr = DirTargetManager(target_dir, cache_dir)
-    compiler = Compiler(tmgr, None, cache_dir)
-    project_manager = ProjectManager(str(project_dir), tmgr, compiler, cache_dir)
+    project_manager = ProjectManager(str(project_dir), tmgr, cache_dir)
     project_manager.deploy(mpy_cross_path=None)
 
     assert create_dir_snapshot(target_dir) == snapshot

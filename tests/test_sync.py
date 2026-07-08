@@ -2,7 +2,6 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from minny.compiling import Compiler
 from minny.dir_target import DummyTargetManager
 from minny.project import ProjectManager
 
@@ -47,8 +46,7 @@ def test_sync_command(snapshot):
 
     cache_dir = tempfile.mkdtemp()
     tmgr = DummyTargetManager(cache_dir)
-    compiler = Compiler(tmgr, None, cache_dir)
-    project_manager = ProjectManager(str(project_dir), tmgr, compiler, cache_dir)
+    project_manager = ProjectManager(str(project_dir), tmgr, cache_dir)
     project_manager.sync()
 
     # Verify lib directory was created

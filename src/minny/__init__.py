@@ -4,7 +4,6 @@ import sys
 import traceback
 
 from minny.common import ManagementError, UserError, get_default_minny_cache_dir
-from minny.compiling import Compiler
 from minny.target import TargetManager, create_target_manager
 from minny.util import find_enclosing_project
 
@@ -68,8 +67,7 @@ def main(raw_args: list[str] | None = None) -> int:
         else:
             project_dir = args.project or find_enclosing_project()
             assert project_dir is not None
-            compiler = Compiler(tmgr, args_dict.get("mpy_cross", None), cache_dir)
-            command_handler = ProjectManager(project_dir, tmgr, compiler, cache_dir)
+            command_handler = ProjectManager(project_dir, tmgr, cache_dir)
             method = getattr(command_handler, args.main_command)
 
         method(**args_dict)

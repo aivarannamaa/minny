@@ -37,13 +37,13 @@ class DeployPackagesItem:
 
 @dataclass
 class DeployTable:
-    current_package_installer: str
     files: list[DeployFilesItem]
     packages: list[DeployPackagesItem]
 
 
 @dataclass
 class MinnySettings:
+    current_package_installer: str
     dependencies: DependenciesTable
     deploy: DeployTable
 
@@ -51,10 +51,17 @@ class MinnySettings:
 class SettingsReader:
     def read_minny_settings(self, context: Any, path: str, context_path: str) -> MinnySettings:
         table = self.read_table(
-            context, path, {}, ["dependencies", "deploy"], context_path=context_path
+            context,
+            path,
+            {},
+            ["current-package-installer", "dependencies", "deploy"],
+            context_path=context_path,
         )
         table_abs_path = self._join_paths(context_path, path)
         return MinnySettings(
+            current_package_installer=self.read_current_package_installer(
+                table, "current-package-installer", context_path=table_abs_path
+            ),
             dependencies=self.read_minny_dependencies_table(
                 table, "dependencies", context_path=table_abs_path
             ),
@@ -90,9 +97,6 @@ class SettingsReader:
         )
 
         return DeployTable(
-            current_package_installer=self.read_current_package_installer(
-                table, "current-package-installer", context_path=table_abs_path
-            ),
             files=files,
             packages=packages,
         )
