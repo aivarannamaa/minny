@@ -1,11 +1,9 @@
 import fnmatch
-import hashlib
-import json
 import os.path
 import pathlib
 import zlib
 from logging import getLogger
-from typing import Any, TypedDict
+from typing import Any
 
 from minny import get_default_minny_cache_dir
 from minny.circup import CircupInstaller
@@ -19,17 +17,6 @@ from minny.target import TargetManager
 from minny.util import parse_json_file, parse_toml_file
 
 logger = getLogger(__name__)
-
-
-class _InstallerSyncState(TypedDict):
-    specs: list[str]
-    metas: dict[str, PackageMetadata]
-
-
-class _CachedProjectInfo(TypedDict):
-    project_path: str
-    lib_dir: str
-    last_sync_states: dict[str, _InstallerSyncState]
 
 
 class ProjectManager:
@@ -120,9 +107,6 @@ class ProjectSyncer:
         os.makedirs(self._lib_dir, exist_ok=True)
 
         current_package_installer_name = self._get_current_package_installer_type()
-
-        last_sync_states = self._load_last_sync_states()
-        new_sync_states: dict[str, _InstallerSyncState] = {}
         all_relevant_files = []
 
         for installer_name in ["pip", "mip", "circup"]:
@@ -139,51 +123,27 @@ class ProjectSyncer:
                 # add current package as implicit dependency
                 extended_spec_strings.insert(0, "-e .")
 
-            installer_new_sync_state = self._sync_installer_dependencies(
-                installer_name, extended_spec_strings, last_sync_states.get(installer_name)
+            required_metas = self._sync_installer_dependencies(
+                installer_name, extended_spec_strings
             )
-            for meta in installer_new_sync_state["metas"].values():
+            for meta in required_metas.values():
                 all_relevant_files += meta["files"]
-            new_sync_states[installer_name] = installer_new_sync_state
 
         self._clean_up_local_lib(all_relevant_files)
-
-        if new_sync_states != last_sync_states:
-            self._save_last_sync_states(new_sync_states)
 
     def _sync_installer_dependencies(
         self,
         installer_name: str,
         espec_strings: list[str],
-        last_sync_state: _InstallerSyncState | None,
-    ) -> _InstallerSyncState:
+    ) -> dict[str, PackageMetadata]:
         installer = create_installer_by_name(
             installer_name, self._lib_dir_mgr, self._minny_cache_dir
         )
-        especs = [installer.parse_extended_spec(s) for s in espec_strings]
 
-        if last_sync_state is not None:
-            self._remove_out_of_date_editables_from_lib(installer, last_sync_state)
-
-        intermediate_metas = installer.get_installed_package_metas()
-
-        if last_sync_state is None:
-            logger.debug(f"No last sync state for {installer_name}")
-        elif especs != last_sync_state["specs"]:
-            logger.info(f"Package specs for {installer_name} have been changed")
-        elif intermediate_metas != last_sync_state["metas"]:
-            logger.info(f"Metadata files for {installer_name} not up to date")
-        else:
-            # This is supposed to be the most common case
-            # TODO: also check that all listed files are still present
-            logger.debug("The lib folder is already in sync")
-            assert last_sync_state is not None
-            return last_sync_state
-
-        if not especs:
+        if not espec_strings:
             logger.debug(f"No specs for {installer_name}")
         else:
-            logger.debug(f"Need to invoke {installer_name}")
+            logger.debug(f"Invoking {installer_name} for top-level sync requirements")
             installer.install_for_project(
                 extended_specs=espec_strings, project_path=self._project_dir
             )
@@ -197,13 +157,7 @@ class ProjectSyncer:
         logger.debug(
             f"New set of required {installer_name} packages: {', '.join(intermediate_metas.keys())}"
         )
-        return _InstallerSyncState(specs=espec_strings, metas=required_metas)
-
-    def _remove_out_of_date_editables_from_lib(
-        self, installer: Installer, last_sync_state: _InstallerSyncState
-    ):
-        # TODO: removing is simple way to force reinstallation
-        pass
+        return required_metas
 
     def filter_required_packages(
         self,
@@ -286,43 +240,6 @@ class ProjectSyncer:
             return "pip"
 
         return "none"
-
-    def _load_last_sync_states(self) -> dict[str, _InstallerSyncState]:
-        path = self._get_project_cache_path()
-        if os.path.exists(path):
-            assert os.path.isfile(path), f"{path} is not a file"
-            info: _CachedProjectInfo = parse_json_file(path)
-            if not os.path.samefile(info["project_path"], self._project_dir):
-                logger.warning("Cached project info has different project path")  # hash collision?
-                return {}
-            if info["lib_dir"] != self._lib_dir:
-                logger.info("Lib dir has changed since last sync")
-                return {}
-
-            return info["last_sync_states"]
-        else:
-            logger.debug("Last sync info not found")
-            return {}
-
-    def _save_last_sync_states(self, last_sync_states: dict[str, _InstallerSyncState]) -> None:
-        path = self._get_project_cache_path()
-        logger.debug(f"Saving project info to '{path}'")
-        info = _CachedProjectInfo(
-            project_path=self._project_dir, lib_dir=self._lib_dir, last_sync_states=last_sync_states
-        )
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, mode="wt", encoding="utf-8") as fp:
-            json.dump(
-                info,
-                fp,
-            )
-
-    def _get_project_cache_path(self) -> str:
-        canonical_project_path = os.path.realpath(
-            os.path.normpath(os.path.normcase(self._project_dir))
-        )
-        project_hash = hashlib.sha256(canonical_project_path.encode("utf-8")).hexdigest()[:20]
-        return os.path.join(self._minny_cache_dir, "projects", project_hash + ".json")
 
 
 class ProjectDeployer:
