@@ -123,11 +123,9 @@ class ProjectSyncer:
                 # add current package as implicit dependency
                 extended_spec_strings.insert(0, "-e .")
 
-            required_metas = self._sync_installer_dependencies(
+            all_relevant_files += self._sync_installer_dependencies(
                 installer_name, extended_spec_strings
             )
-            for meta in required_metas.values():
-                all_relevant_files += meta["files"]
 
         self._clean_up_local_lib(all_relevant_files)
 
@@ -135,65 +133,22 @@ class ProjectSyncer:
         self,
         installer_name: str,
         espec_strings: list[str],
-    ) -> dict[str, PackageMetadata]:
+    ) -> list[str]:
         installer = create_installer_by_name(
             installer_name, self._lib_dir_mgr, self._minny_cache_dir
         )
 
         if not espec_strings:
             logger.debug(f"No specs for {installer_name}")
+            return []
         else:
             logger.debug(f"Invoking {installer_name} for top-level sync requirements")
-            installer.install_for_project(
+            result = installer.install_for_project(
                 extended_specs=espec_strings, project_path=self._project_dir
             )
 
-        # Some installed packages may not be required anymore
-        intermediate_metas = installer.get_installed_package_metas()
-        logger.debug(
-            f"New set of {installer_name} packages after install: {', '.join(intermediate_metas.keys())}"
-        )
-        required_metas = self.filter_required_packages(intermediate_metas, espec_strings, installer)
-        logger.debug(
-            f"New set of required {installer_name} packages: {', '.join(intermediate_metas.keys())}"
-        )
-        return required_metas
-
-    def filter_required_packages(
-        self,
-        metas: dict[str, PackageMetadata],
-        espec_strings: list[str],
-        installer: Installer,
-    ) -> dict[str, PackageMetadata]:
-        result = {}
-
-        def collect_required_metas(_especs: list[str]) -> None:
-            for espec_str in _especs:
-                espec = installer.parse_extended_spec(espec_str)
-                if espec.name is not None:
-                    name = espec.name
-                else:
-                    assert espec.location is not None
-                    assert espec.is_local_dir_spec()
-                    candidates = [
-                        m for m in metas.values() if m.get("requirement") == espec.extended_spec
-                    ]
-                    assert len(candidates) == 1
-                    name = installer.canonicalize_package_name(candidates[0]["name"])
-
-                canonical_name = installer.canonicalize_package_name(name)
-                if canonical_name in result:
-                    continue
-
-                meta = metas.get(canonical_name, None)
-                if meta is not None:
-                    result[canonical_name] = meta
-
-                    collect_required_metas(meta.get("dependencies", []))
-
-        collect_required_metas(espec_strings)
-
-        return result
+        logger.debug(f"Required {installer_name} packages: {', '.join(result.packages.keys())}")
+        return result.files
 
     def _clean_up_local_lib(self, all_relevant_files: list[str]) -> None:
         # Remove orphaned files not part of any package

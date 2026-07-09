@@ -1,3 +1,4 @@
+import json
 import shutil
 import tempfile
 from pathlib import Path
@@ -16,6 +17,25 @@ DUMMY_FILES = [
 DUMMY_CONTENT = "# This is a dummy file that should be removed by sync"
 CONFLICTING_FILE = "adafruit_ssd1306.py"
 CONFLICTING_DUMMY_CONTENT = "# This dummy content should be replaced by the real package"
+
+
+def create_local_mip_package(base_dir: Path, name: str) -> Path:
+    package_dir = base_dir / name
+    package_dir.mkdir()
+    module_name = name.replace("-", "_")
+    module_file_name = f"{module_name}.py"
+    (package_dir / module_file_name).write_text(f"NAME = {name!r}\n", encoding="utf-8")
+    (package_dir / "package.json").write_text(
+        json.dumps(
+            {
+                "name": name,
+                "version": "1.0.0",
+                "urls": [[module_file_name, module_file_name]],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return package_dir
 
 
 def test_sync_command(snapshot):
@@ -75,3 +95,50 @@ def test_sync_command(snapshot):
     # Create a snapshot of the lib directory structure
     lib_structure = sorted([str(p.relative_to(actual_lib_dir)) for p in actual_lib_dir.rglob("*")])
     assert lib_structure == snapshot
+
+
+def test_sync_removes_package_that_is_no_longer_required(tmp_path):
+    project_dir = tmp_path / "project"
+    packages_dir = tmp_path / "packages"
+    cache_dir = tmp_path / "cache"
+    project_dir.mkdir()
+    packages_dir.mkdir()
+    cache_dir.mkdir()
+
+    kept_package = create_local_mip_package(packages_dir, "kept-package")
+    obsolete_package = create_local_mip_package(packages_dir, "obsolete-package")
+
+    pyproject_toml = project_dir / "pyproject.toml"
+    pyproject_toml.write_text(
+        f"""
+[tool.minny.dependencies]
+mip = [
+    "{kept_package.as_posix()}",
+    "{obsolete_package.as_posix()}",
+]
+""",
+        encoding="utf-8",
+    )
+
+    tmgr = DummyTargetManager(str(cache_dir))
+    ProjectManager(str(project_dir), tmgr, str(cache_dir)).sync()
+
+    lib_dir = project_dir / ".minny" / "lib"
+    assert (lib_dir / "kept_package.py").is_file()
+    assert (lib_dir / "obsolete_package.py").is_file()
+    assert (lib_dir / ".mip" / "obsolete%2Dpackage-1.0.0.meta").is_file()
+
+    pyproject_toml.write_text(
+        f"""
+[tool.minny.dependencies]
+mip = ["{kept_package.as_posix()}"]
+""",
+        encoding="utf-8",
+    )
+
+    ProjectManager(str(project_dir), tmgr, str(cache_dir)).sync()
+
+    assert (lib_dir / "kept_package.py").is_file()
+    assert (lib_dir / ".mip" / "kept%2Dpackage-1.0.0.meta").is_file()
+    assert not (lib_dir / "obsolete_package.py").exists()
+    assert not (lib_dir / ".mip" / "obsolete%2Dpackage-1.0.0.meta").exists()

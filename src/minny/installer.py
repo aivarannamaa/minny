@@ -92,6 +92,18 @@ class PackageDeployRecipe:
     uploads: list[PackageDeployUpload]
 
 
+@dataclasses.dataclass(frozen=True)
+class InstallResult:
+    packages: dict[str, PackageMetadata]
+
+    @property
+    def files(self) -> list[str]:
+        result = []
+        for meta in self.packages.values():
+            result.extend(meta["files"])
+        return result
+
+
 class Installer(ABC):
     """Base class for all package installers."""
 
@@ -116,13 +128,13 @@ class Installer(ABC):
     @abstractmethod
     def get_installer_name(self) -> str: ...
 
-    def install_for_project(self, extended_specs: list[str], project_path: str) -> None:
+    def install_for_project(self, extended_specs: list[str], project_path: str) -> InstallResult:
         # Local deps may be given with relative paths, and these are relative to project_path.
         # Installer, on the other hand, uses cwd as anchor.
         old_wd = os.getcwd()
         os.chdir(project_path)
         try:
-            self.install(extended_specs=extended_specs, compile=False)
+            return self.install(extended_specs=extended_specs, compile=False)
         finally:
             os.chdir(old_wd)
 
@@ -136,7 +148,7 @@ class Installer(ABC):
         upgrade: bool = False,
         force_reinstall: bool = False,
         **kwargs,
-    ) -> None:
+    ) -> InstallResult:
         extended_specs = extended_specs or []
         all_extended_specs = extended_specs + self._load_requirements(requirement_files or [])
 
@@ -144,6 +156,7 @@ class Installer(ABC):
 
         compiler = Compiler(self._tmgr, mpy_cross, self._minny_cache_dir)
         installation_attempts: list[ExtendedSpec] = []
+        relevant_packages: dict[str, PackageMetadata] = {}
 
         for espec_str in all_extended_specs:
             self._install_package_and_dependencies(
@@ -152,9 +165,12 @@ class Installer(ABC):
                 compile=compile,
                 compiler=compiler,
                 installation_attempts=installation_attempts,
+                relevant_packages=relevant_packages,
                 upgrade=upgrade,
                 force_reinstall=force_reinstall,
             )
+
+        return InstallResult(relevant_packages)
 
     def _load_requirements(self, requirement_files: list[str]) -> list[str]:
         result = []
@@ -170,6 +186,7 @@ class Installer(ABC):
         compile: bool,
         compiler: Compiler,
         installation_attempts: list[ExtendedSpec],
+        relevant_packages: dict[str, PackageMetadata],
         upgrade: bool,
         force_reinstall: bool,
     ) -> PackageMetadata:
@@ -177,7 +194,7 @@ class Installer(ABC):
             logger.debug(f"Skipping another install of '{espec}' to avoid infinite recursion.")
             candidates = [
                 meta
-                for meta in self.get_installed_package_metas().values()
+                for meta in relevant_packages.values()
                 if meta.get("requirement") == espec.extended_spec
             ]
             if candidates:
@@ -197,12 +214,14 @@ class Installer(ABC):
                     f"({installed_info.version})."
                 )
                 meta = self.load_package_metadata(installed_info)
+                self._register_relevant_package(meta, relevant_packages)
                 if not no_deps:
                     self._install_dependencies(
                         meta,
                         compile=compile,
                         compiler=compiler,
                         installation_attempts=installation_attempts,
+                        relevant_packages=relevant_packages,
                         upgrade=upgrade,
                         force_reinstall=force_reinstall,
                     )
@@ -214,6 +233,7 @@ class Installer(ABC):
             compiler=compiler,
         )
         meta = self.apply_editable_install(meta, espec)
+        self._register_relevant_package(meta, relevant_packages)
 
         if not no_deps:
             self._install_dependencies(
@@ -221,6 +241,7 @@ class Installer(ABC):
                 compile=compile,
                 compiler=compiler,
                 installation_attempts=installation_attempts,
+                relevant_packages=relevant_packages,
                 upgrade=upgrade,
                 force_reinstall=force_reinstall,
             )
@@ -233,6 +254,7 @@ class Installer(ABC):
         compile: bool,
         compiler: Compiler,
         installation_attempts: list[ExtendedSpec],
+        relevant_packages: dict[str, PackageMetadata],
         upgrade: bool,
         force_reinstall: bool,
     ) -> None:
@@ -243,9 +265,15 @@ class Installer(ABC):
                 compile=compile,
                 compiler=compiler,
                 installation_attempts=installation_attempts,
+                relevant_packages=relevant_packages,
                 upgrade=upgrade,
                 force_reinstall=force_reinstall,
             )
+
+    def _register_relevant_package(
+        self, meta: PackageMetadata, relevant_packages: dict[str, PackageMetadata]
+    ) -> None:
+        relevant_packages[self.canonicalize_package_name(meta["name"])] = meta
 
     def get_dependency_specs(self, meta: PackageMetadata) -> list[str]:
         return meta.get("dependencies", [])
@@ -504,15 +532,6 @@ class Installer(ABC):
                 result[info.name] = info
 
         return result
-
-    def get_installed_package_metas(self) -> dict[str, PackageMetadata]:
-        result = {}
-        for name, info in self.get_installed_package_infos().items():
-            result[name] = self.load_package_metadata(info)
-        return result
-
-    def get_installed_package_names(self) -> builtins.list[str]:
-        return list(self.get_installed_package_infos().keys())
 
     def get_installed_package_info(self, name: str) -> PackageInstallationInfo | None:
         canonical_name = self.canonicalize_package_name(name)
