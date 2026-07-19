@@ -31,8 +31,6 @@ The deployment check is layered:
 4. Otherwise, Minny asks the target for the current file CRC32. If the target file already has the same CRC32, Minny updates the local tracking information without rewriting the file.
 5. If the CRC32 differs, or if the target cannot provide one, Minny writes the file and updates the tracking information.
 
-Package deployment also records which files belonged to the last tracked installation of each package. This lets Minny remove files left over from a previous package installation without scanning the whole device in the common case.
-
 CRC32 is used as a change detector, not as a cryptographic integrity mechanism. Its collision risk is acceptable for avoiding redundant device writes.
 
 #### Detecting stale tracking information

@@ -12,18 +12,9 @@ from logging import getLogger
 from pathlib import Path
 from typing import Any
 
-import packaging.version
 from packaging.utils import canonicalize_name
 
 logger = getLogger(__name__)
-
-
-def create_dist_info_version_name(dist_name: str, version: str) -> str:
-    # https://packaging.python.org/en/latest/specifications/binary-distribution-format/#escaping-and-unicode
-    # https://peps.python.org/pep-0440/
-    name = normalize_name(dist_name).replace("-", "_")
-    version = normalize_version(version)
-    return f"{name}-{version}"
 
 
 def get_windows_folder(ID: int) -> str:
@@ -112,11 +103,6 @@ def is_continuation_byte(byte: int) -> bool:
     return (byte & 0b11000000) == 0b10000000
 
 
-def custom_normalize_dist_name(name: str) -> str:
-    # https://peps.python.org/pep-0503/#normalized-names
-    return normalize_name(name).lower().replace("-", "_")
-
-
 def list_volumes() -> list[str]:
     skip_letters = {"A"}  # can be slow to query
 
@@ -148,28 +134,6 @@ def list_volumes() -> list[str]:
         # Call the unix "mount" command to list the mounted volumes.
         mount_output = subprocess.check_output(["mount"], stdin=subprocess.DEVNULL).splitlines()
         return [x.split()[2].decode("utf-8") for x in mount_output]
-
-
-def normalize_name(name: str) -> str:
-    """Convert an arbitrary string to a standard distribution name
-
-    Any runs of non-alphanumeric/. characters are replaced with a single '-'.
-    Copied from pkg_resources
-    """
-    return re.sub("[^A-Za-z0-9.]+", "-", name)
-
-
-def normalize_version(version):
-    """
-    Convert an arbitrary string to a standard version string
-    Copied from pkg_resources
-    """
-    try:
-        # normalize the version
-        return str(packaging.version.Version(version))
-    except packaging.version.InvalidVersion:
-        version = version.replace(" ", ".")
-        return re.sub("[^A-Za-z0-9.]+", "-", version)
 
 
 def is_safe_version(version: str) -> bool:

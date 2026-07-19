@@ -137,11 +137,19 @@ class TargetManager(ABC):
     This requirement is related to the caching used in TargetManager.
     """
 
-    def __init__(self, minny_cache_dir: str | None = None):
-        from minny.tracking import Tracker
+    def __init__(
+        self,
+        minny_cache_dir: str | None = None,
+        *,
+        persistent_tracking: bool = True,
+    ):
+        from minny.tracking import DummyTracker, Tracker
 
         self._ensured_directories = set()
-        self._tracker = Tracker(self, minny_cache_dir)
+        if persistent_tracking:
+            self._tracker = Tracker(self, minny_cache_dir)
+        else:
+            self._tracker = DummyTracker(self, minny_cache_dir)
 
     @property
     def tracker(self):
@@ -2047,7 +2055,10 @@ def ends_overlap(left, right) -> int:
 
 
 def create_target_manager(
-    port: str | None, mount: str | None, dir: str | None, minny_cache_dir: str | None = None, **kw
+    port: str | None = None,
+    mount: str | None = None,
+    dir: str | None = None,
+    minny_cache_dir: str | None = None,
 ) -> TargetManager:
     if port is None and mount is None and dir is None:
         candidates = _infer_possible_targets()

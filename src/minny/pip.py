@@ -17,6 +17,7 @@ from minny.installer import (
     META_ENCODING,
     ExtendedSpec,
     Installer,
+    PackageCandidate,
     PackageMetadata,
     parse_pip_compatible_plain_spec,
 )
@@ -57,7 +58,10 @@ class PipInstaller(Installer):
             )
             args = ["install", "--overrides", global_overrides_path, "--target", target_dir]
 
-            self._invoke_pip(args + ["--no-deps", espec.plain_spec])
+            self._invoke_pip(
+                args + ["--no-deps", espec.plain_spec],
+                cwd=espec.base_dir,
+            )
             dist_info_dirs = self._list_dist_info_dirs(target_dir)
 
             assert len(dist_info_dirs) == 1
@@ -76,9 +80,22 @@ class PipInstaller(Installer):
         # TODO:
         return None
 
-    def is_package_version_compatible(self, espec: ExtendedSpec, version: str) -> bool:
+    def is_package_candidate_compatible(
+        self, espec: ExtendedSpec, candidate: PackageCandidate
+    ) -> bool:
+        if espec.is_local_dir_spec() or espec.editable:
+            return False
+        return self.does_package_candidate_satisfy(espec, candidate)
+
+    def does_package_candidate_satisfy(
+        self, espec: ExtendedSpec, candidate: PackageCandidate
+    ) -> bool:
+        if not self.are_common_candidate_properties_satisfied(espec, candidate):
+            return False
+        if espec.name is None:
+            return True
         requirement = Requirement(espec.plain_spec)
-        return version in requirement.specifier
+        return candidate.version in requirement.specifier
 
     def _install_package_from_temp_target(
         self,
@@ -92,6 +109,7 @@ class PipInstaller(Installer):
         self._report_progress(f"Copying {canonical_name} {version}")
 
         meta = self._read_essential_metadata_from_dist_info_dir(temp_target_dir, dist_info_dir_name)
+        self.validate_candidate_name(espec, meta["name"])
         meta["requirement"] = espec.extended_spec
 
         rel_paths = read_package_file_paths_from_dist_info_dir(temp_target_dir, dist_info_dir_name)
@@ -106,12 +124,12 @@ class PipInstaller(Installer):
             )
             meta["files"].append(final_rel_path)
 
-        return self.finalize_package_install(meta)
+        return self.finalize_package_install(meta, espec)
 
     def _list_dist_info_dirs(self, containing_dir: str) -> list[str]:
         return [name for name in os.listdir(containing_dir) if name.endswith(".dist-info")]
 
-    def _invoke_pip(self, args: list[str]) -> None:
+    def _invoke_pip(self, args: list[str], cwd: str | None = None) -> None:
         pip_cmd = ["uv", "pip", "--quiet"]
 
         if not self._tty:
@@ -120,7 +138,12 @@ class PipInstaller(Installer):
         pip_cmd += args
         logger.debug("Calling uv pip: %s", " ".join(shlex.quote(arg) for arg in pip_cmd))
 
-        subprocess.check_call(pip_cmd, executable=pip_cmd[0], stdin=subprocess.DEVNULL)
+        subprocess.check_call(
+            pip_cmd,
+            executable=pip_cmd[0],
+            stdin=subprocess.DEVNULL,
+            cwd=cwd,
+        )
 
     def _report_progress(self, msg: str, end="\n") -> None:
         if not self._quiet:
@@ -201,10 +224,31 @@ class PipInstaller(Installer):
         requirement = Requirement(spec)
         return canonicalize_name(requirement.name) in self.get_normalized_no_deploy_packages()
 
-    def get_dependency_specs(self, meta: PackageMetadata) -> list[str]:
-        return [
-            dep for dep in meta.get("dependencies", []) if not self._should_ignore_dependency(dep)
-        ]
+    def get_dependency_specs(self, meta: PackageMetadata, parent_espec: ExtendedSpec) -> list[str]:
+        parent_extras: set[str]
+        if parent_espec.name is None:
+            parent_extras = set()
+        else:
+            parent_extras = set(Requirement(parent_espec.plain_spec).extras)
+
+        marker_extras = parent_extras or {""}
+        result = []
+        for dep in meta.get("dependencies", []):
+            requirement = Requirement(dep)
+            if self._should_ignore_dependency(dep):
+                continue
+            if requirement.marker is not None:
+                if not any(
+                    requirement.marker.evaluate({"extra": extra}) for extra in marker_extras
+                ):
+                    continue
+                # The marker has been evaluated in the context of the parent package.
+                # In particular, uv cannot evaluate an `extra` marker correctly once
+                # this dependency is installed as an independent requirement.
+                requirement.marker = None
+            result.append(str(requirement))
+
+        return result
 
 
 def read_package_file_paths_from_dist_info_dir(

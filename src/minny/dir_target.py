@@ -15,12 +15,18 @@ class DirTargetManager(TargetManager):
     def _raw_mkdir(self, path: str) -> None:
         os.mkdir(path)
 
-    def __init__(self, base_path: str, minny_cache_dir: str | None = None):
+    def __init__(
+        self,
+        base_path: str,
+        minny_cache_dir: str | None = None,
+        *,
+        persistent_tracking: bool = True,
+    ):
         if os.path.isfile(base_path):
             raise UserError("base_path should not be a file")
 
         self.base_path = base_path
-        super().__init__(minny_cache_dir)
+        super().__init__(minny_cache_dir, persistent_tracking=persistent_tracking)
 
     def get_dir_sep(self) -> str:
         return os.path.sep
@@ -118,4 +124,4 @@ class DirTargetManager(TargetManager):
 
 class DummyTargetManager(DirTargetManager):
     def __init__(self, minny_cache_dir: str | None = None):
-        super().__init__(tempfile.gettempdir(), minny_cache_dir)
+        super().__init__(tempfile.gettempdir(), minny_cache_dir, persistent_tracking=False)

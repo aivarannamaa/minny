@@ -1,18 +1,14 @@
-import io
 import json
+import keyword
 import os.path
 import pathlib
 import re
 import shutil
 import subprocess
-import sys
-import tarfile
 import tempfile
-import urllib.request
 from logging import getLogger
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
@@ -20,11 +16,12 @@ from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
 from minny import get_default_minny_cache_dir
-from minny.common import UserError
+from minny.common import UserError, download_git_repo_snapshot, fetch_git_refs
 from minny.compiling import Compiler
 from minny.installer import (
     ExtendedSpec,
     Installer,
+    PackageCandidate,
     PackageMetadata,
     parse_pip_compatible_plain_spec,
 )
@@ -34,7 +31,6 @@ from minny.util import (
     download_bytes,
     get_latest_github_release_tag,
     is_safe_version,
-    normalize_name,
     parse_dist_info_dir_name,
     parse_toml_file,
     read_requirements_from_txt_file,
@@ -131,7 +127,6 @@ class CircupInstaller(Installer):
             return self._install_local_package(
                 espec=espec,
                 target_dir=self._target_dir,
-                expected_package_name=None,
                 compile=compile,
                 compiler=compiler,
             )
@@ -150,31 +145,32 @@ class CircupInstaller(Installer):
         else:
             return None
 
-    def is_package_version_compatible(self, espec: ExtendedSpec, version: str) -> bool:
+    def is_package_candidate_compatible(
+        self, espec: ExtendedSpec, candidate: PackageCandidate
+    ) -> bool:
+        if espec.is_local_dir_spec() or espec.editable:
+            return False
+        return self.does_package_candidate_satisfy(espec, candidate)
+
+    def does_package_candidate_satisfy(
+        self, espec: ExtendedSpec, candidate: PackageCandidate
+    ) -> bool:
+        if not self.are_common_candidate_properties_satisfied(espec, candidate):
+            return False
+        if espec.name is None:
+            return True
         requirement = Requirement(espec.plain_spec)
-        return Version(version) in requirement.specifier
+        return Version(candidate.version) in requirement.specifier
 
     def _install_local_package(
         self,
         espec: ExtendedSpec,
         target_dir: str,
-        expected_package_name: str | None,
         compile: bool,
         compiler: Compiler,
     ) -> PackageMetadata:
-        parsed_package_name = espec.name
-        source_dir = espec.location
+        source_dir = espec.get_resolved_location()
         assert source_dir is not None
-
-        assert (
-            parsed_package_name is None
-            or expected_package_name is None
-            or self.canonicalize_package_name(parsed_package_name)
-            == self.canonicalize_package_name(expected_package_name)
-        )
-
-        if parsed_package_name is not None and expected_package_name is None:
-            expected_package_name = parsed_package_name
 
         pyproject_toml_path = os.path.join(source_dir, "pyproject.toml")
         if not os.path.isfile(pyproject_toml_path):
@@ -188,27 +184,26 @@ class CircupInstaller(Installer):
             )
 
         temp_build_path = tempfile.mkdtemp()
+        try:
+            package_name, version = CircupBuilder().build_local_package(
+                package_name=None,
+                version=None,
+                source_dir=source_dir,
+                target_dir=temp_build_path,
+                is_temp_source_dir=False,
+            )
 
-        package_name, version = CircupBuilder().build_local_package(
-            package_name=expected_package_name,
-            version=None,
-            source_dir=source_dir,
-            target_dir=temp_build_path,
-            is_temp_source_dir=False,
-        )
-
-        meta = self._install_built_package(
-            espec,
-            temp_build_path,
-            package_name,
-            version,
-            target_dir,
-            compile,
-            compiler,
-        )
-
-        shutil.rmtree(temp_build_path)
-        return meta
+            return self._install_built_package(
+                espec,
+                temp_build_path,
+                package_name,
+                version,
+                target_dir,
+                compile,
+                compiler,
+            )
+        finally:
+            shutil.rmtree(temp_build_path)
 
     def _install_bundle_package(
         self,
@@ -218,21 +213,21 @@ class CircupInstaller(Installer):
         compiler: Compiler,
     ) -> PackageMetadata:
         requirement = Requirement(espec.plain_spec)
-        canonical_name = normalize_circup_name(requirement.name)
+        package_name = requirement.name
 
         for bundle_id, bundle_meta in self._get_bundle_metas().items():
-            package_bundle_meta = bundle_meta.get(canonical_name)
+            package_bundle_meta = bundle_meta.get(package_name)
             if package_bundle_meta is not None:
-                print(f"Installing {canonical_name} from {bundle_id}")
+                print(f"Installing {package_name} from {bundle_id}")
                 break
         else:
             raise UserError(
-                f"Could not find package {canonical_name} from {', '.join(self._get_bundle_metas().keys())}"
+                f"Could not find package {package_name} from {', '.join(self._get_bundle_metas().keys())}"
             )
 
         repo_url: str = package_bundle_meta["repo"]
         tags = list(
-            _fetch_git_refs(
+            fetch_git_refs(
                 repo_url if repo_url.endswith(".git") else repo_url.rstrip("/") + ".git"
             )[0].keys()
         )
@@ -240,17 +235,17 @@ class CircupInstaller(Installer):
         assert version is not None  # TODO
         if not is_safe_version(version):
             raise UserError(
-                f"Latest version of {canonical_name} ('{version}') contains forbidden symbols."
+                f"Latest version of {package_name} ('{version}') contains forbidden symbols."
             )
 
         logger.info(f"Installing version {version}")
 
-        build_path: str = os.path.join(self._cache_dir, "circup", "builds", canonical_name, version)
+        build_path: str = os.path.join(self._cache_dir, "circup", "builds", package_name, version)
 
         if not os.path.isdir(build_path):
             logger.info("Version not cached yet")
             CircupBuilder().build_bundle_package(
-                canonical_name, repo_url, tag=version, target_dir=build_path
+                package_name, repo_url, tag=version, target_dir=build_path
             )
         else:
             logger.info("Version is already in cache")
@@ -258,7 +253,7 @@ class CircupInstaller(Installer):
         return self._install_built_package(
             espec,
             build_path,
-            canonical_name,
+            package_name,
             version,
             target_dir,
             compile,
@@ -269,16 +264,18 @@ class CircupInstaller(Installer):
         self,
         espec: ExtendedSpec,
         build_path: str,
-        canonical_name: str,
+        package_name: str,
         version: str,
         target_dir: str,
         compile: bool,
         compiler: Compiler,
     ) -> PackageMetadata:
-        # TODO: add actual name instead of canonical, license, summary, urls
+        self._validate_package_name(package_name)
+        # TODO: add license, summary, urls
         meta = PackageMetadata(
-            name=canonical_name, version=version, files=[], requirement=espec.extended_spec
+            name=package_name, version=version, files=[], requirement=espec.extended_spec
         )
+        self.validate_candidate_name(espec, package_name)
 
         src_lib_dir = os.path.join(build_path, "lib")
         assert os.path.isdir(src_lib_dir)
@@ -299,14 +296,14 @@ class CircupInstaller(Installer):
                 )
                 meta["files"].append(final_target_rel_path)
 
-        deps = self._find_package_deps_from_source(build_path, canonical_name)
+        deps = self._find_package_deps_from_source(build_path, package_name)
         meta["dependencies"] = deps
 
-        return self.finalize_package_install(meta)
+        return self.finalize_package_install(meta, espec)
 
-    def _find_package_deps_from_source(self, build_path, canonical_name) -> list[str]:
+    def _find_package_deps_from_source(self, build_path, package_name) -> list[str]:
         all_reqs = []
-        pypi_reqs_path = Path(build_path, "requirements", canonical_name, "requirements.txt")
+        pypi_reqs_path = Path(build_path, "requirements", package_name, "requirements.txt")
         if pypi_reqs_path.is_file():
             pypi_specs = self._load_requirements([str(pypi_reqs_path)])
             for pypi_spec in pypi_specs:
@@ -318,7 +315,7 @@ class CircupInstaller(Installer):
                 else:
                     all_reqs.append(circup_spec)
 
-        pyproject_toml_path = Path(build_path, "requirements", canonical_name, "pyproject.toml")
+        pyproject_toml_path = Path(build_path, "requirements", package_name, "pyproject.toml")
         if pyproject_toml_path.is_file():
             all_reqs.extend(read_circup_deps_from_pyproject_toml_file(pyproject_toml_path))
 
@@ -350,7 +347,6 @@ class CircupInstaller(Installer):
         return circup_name + pypi_spec[len(pypi_name) :]
 
     def _find_package_bundle_info(self, name: str) -> dict[str, Any] | None:
-        name = normalize_circup_name(name)
         for bundle_info in self._get_bundle_metas().values():
             for package_name, package_info in bundle_info.items():
                 if package_name == name:
@@ -361,7 +357,9 @@ class CircupInstaller(Installer):
     def _pypi_name_to_circup_name(self, pypi_name: str) -> str | None:
         for bundle_meta in self._get_bundle_metas().values():
             for name, info in bundle_meta.items():
-                if normalize_name(info.get("pypi_name")) == normalize_name(pypi_name):
+                if self.canonicalize_package_name(
+                    info.get("pypi_name")
+                ) == self.canonicalize_package_name(pypi_name):
                     return name
 
         return None
@@ -389,13 +387,20 @@ class CircupInstaller(Installer):
         return ["circuitpython_typing"]
 
     def _parse_plain_spec(self, plain_spec: str) -> ExtendedSpec:
-        return parse_pip_compatible_plain_spec(plain_spec)
+        result = parse_pip_compatible_plain_spec(plain_spec)
+        if result.name is not None:
+            self._validate_package_name(result.name)
+        return result
+
+    def _validate_package_name(self, name: str) -> None:
+        if not name.isidentifier() or keyword.iskeyword(name):
+            raise UserError(f"Circup package name {name!r} is not a valid Python module name")
 
 
 class CircupBuilder:
     def build_bundle_package(self, package_name, repo_url, tag, target_dir):
         snapshot_dir = tempfile.mkdtemp()
-        _download_git_repo_snapshot(repo_url, tag, snapshot_dir)
+        download_git_repo_snapshot(repo_url, tag, snapshot_dir)
         items = os.listdir(snapshot_dir)
         assert len(items) == 1
         source_dir = os.path.join(snapshot_dir, items[0])
@@ -601,56 +606,6 @@ class CircupBuilder:
                 file_path.write_bytes(patched)
 
 
-def normalize_circup_name(name: str) -> str:
-    return name.lower().strip().replace("-", "_").strip("-")
-
-
-def _fetch_git_refs(repo_url: str) -> tuple[dict[str, str], dict[str, str]]:
-    """
-    Returns two dictionaries mapping tags to commit hashes and branches (including pseudo-branch HEAD) to commit hashes
-    """
-    assert repo_url.endswith(".git")
-
-    req = urllib.request.Request(
-        repo_url + "/info/refs?service=git-upload-pack",
-        headers={"User-Agent": "python-ref-resolver/0.2"},
-    )
-    data = urllib.request.urlopen(req, timeout=15).read()
-
-    def pkt_lines(raw: bytes):
-        i = 0
-        while i < len(raw):
-            n = int(raw[i : i + 4], 16)
-            i += 4
-            if n == 0:  # flush
-                continue
-            yield raw[i : i + n - 4].rstrip(b"\r\n")
-            i += n - 4
-
-    tags = {}
-    heads = {}
-
-    for pl in pkt_lines(data):
-        if pl.startswith(b"#"):  # “# service=…”
-            continue
-
-        sha, rest = pl.split(b" ", 1)
-        name, *cap = rest.split(b"\0", 1)
-        name = name.decode()
-        sha = sha.decode()
-
-        if name.endswith("^{}"):  # peeled helper line
-            continue
-        elif name == "HEAD":
-            heads[name] = sha
-        elif name.startswith("refs/tags/"):
-            tags[name[10:]] = sha
-        elif name.startswith("refs/heads/"):
-            heads[name[11:]] = sha
-
-    return tags, heads
-
-
 def _find_best_version(
     versions: list[str],
     spec: SpecifierSet,
@@ -689,30 +644,6 @@ def _find_best_version(
         return originals_by_parsed[max(pres)]
 
     return None
-
-
-def _download_git_repo_snapshot(repo_url: str, tag: str, target_dir) -> None:
-    repo_url = repo_url.removesuffix(".git")
-    repo_url = repo_url.rstrip("/")
-    host = urlsplit(repo_url).netloc
-    repo_name = repo_url.split("/")[-1]
-
-    if "github" in host:
-        snapshot_url = f"{repo_url}/archive/refs/tags/{tag}.tar.gz"
-    elif "gitlab" in host:
-        snapshot_url = f"{repo_url}/-/archive/{tag}/{repo_name}-{tag}.tar.gz"
-    elif "bitbucket" in host:
-        snapshot_url = f"{repo_url}/get/{tag}.tar.gz"
-    else:
-        snapshot_url = f"{repo_url}/archive/{tag}.tar.gz"
-
-    logger.info(f"Downloading {snapshot_url} to {target_dir}")
-    with urllib.request.urlopen(snapshot_url) as resp:
-        with tarfile.open(fileobj=io.BufferedReader(resp), mode="r|gz") as tar:
-            if sys.version_info >= (3, 12):
-                tar.extractall(target_dir, filter="data")
-            else:
-                tar.extractall(target_dir)
 
 
 def read_circup_deps_from_pyproject_toml_file(pyproject_toml_path: Path | str) -> list[str]:

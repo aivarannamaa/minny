@@ -15,8 +15,14 @@ def test_complex(snapshot):
     assert load_from_file("complex.toml") == snapshot
 
 
-def test_current_package_installer_belongs_to_minny_table():
-    assert load_from_file("current-package-installer.toml").current_package_installer == "pip"
+def test_unknown_dependency_installer_raises():
+    with pytest.raises(
+        UserError,
+        match=r"tool\.minny\.dependencies contains unknown keys: \['future'\]",
+    ):
+        load_minny_settings_from_pyproject_toml(
+            {"tool": {"minny": {"dependencies": {"future": ["some-package"]}}}}
+        )
 
 
 def test_deploy_files_not_array_raises():

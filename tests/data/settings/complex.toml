@@ -1,5 +1,5 @@
 [tool.minny.dependencies]
-# specify dependencies here if you don't want to create a package (allows doing away with the [project] table)
+# Dependencies of the Minny application environment.
 mip = ["logging", "unittest@1.2.3"]
 pip = ["adafruit-circuitpython-lcd>=2.3", "adafruit-circuitpython-iobase"]
 circup = ["some-obscure-lib"]
@@ -14,7 +14,7 @@ circup = ["some-obscure-lib"]
 [[tool.minny.deploy.files]]
 source = "src" # default: "auto". Must be relative to pyproject.toml
 destination = "/" # default: "auto". Real path must be absolute
-include = ["main.py", "code.py", "boot.py"] # default: "auto", meaning all py-files which are not part of current package except "manifest.py" and "setup.py"
+include = ["main.py", "code.py", "boot.py"] # default: "auto"
 exclude = ["special-module.py"] # default: []
 compile = ["**/*.py"] # default: "auto", meaning entry files don't get compiled. Most users would use either "auto" or []
 
@@ -26,7 +26,7 @@ include = ["special-module.py"]
 # All selection values refer to packages, not files (including compile).
 # If you want to tweak a package, then exclude it here and deploy as files. In the future I may add exclude-files
 destination = "/lib" # default: "auto". Real path must be absolute
-include = ["*"] # defaults to all dependencies and current package
-exclude = ["asyncio", "."] # Current package can be specified by name or as "./package.json" or "." or "./" (just like you can omit "package.json" in mip install)
+include = ["*"] # defaults to all dependencies
+exclude = ["asyncio"]
 
 compile = ["*"] # default. Compiling a package means compiling all its modules

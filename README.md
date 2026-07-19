@@ -55,7 +55,7 @@ circup = ["multi_keypad"]
 exclude = ["adafruit-circuitpython-typing", "typing-extensions"] 
 ```
 
-> **Note:** If you are creating a MicroPython or CircuitPython _package_ (not an _app_), then you may not even need `tool.minny` settings—Minny will pick up your package dependencies from `project.dependencies` or from `deps` in MicroPython's _package.json_'.
+If the application uses a package from the same directory, declare it explicitly in the appropriate dependency list. For example, `pip = ["-e ."]` installs the co-located pip package and its `project.dependencies`; use the `mip` or `circup` list for packages in those ecosystems.
 
 ### Development environment
 
@@ -83,6 +83,8 @@ extraPaths = [".minny/lib"]
 Besides code completion and type-checking, your IDE should now allow you to Ctrl-click or Command-click from a library function call to its implementation so you can investigate the source code when the documentation is lacking.
 
 > **Note:** If you choose to keep the _lib_ folder under version control, you'll have solid dependency locking in place. If you don't need this, feel free to add the folder to .gitignore and let Minny create and populate it each time someone clones the project and starts working on it.
+
+Minny also writes _.minny/sync-state.json_, a machine-local record of the dependency inputs associated with the local _lib_ directory. This file is derived state and should not be kept under version control, even when _.minny/lib_ is committed.
 
 #### Type stubs
 
@@ -129,9 +131,7 @@ pip = [
 ]
 
 mip = [
-    # You can specify a "public name" to your local package.
-    # This allows overriding a transitive dependency with the same name.
-    "-e github:mphacker75/pfx-330-c@../pfx-330-c"
+    "-e ../pfx-330-c"
 ]
 ```
 
@@ -143,7 +143,7 @@ Editable dependencies are particularly useful when:
 - Contributing to open-source libraries used by your project
 - Working with experimental or unreleased versions of dependencies
 
-> **Note:** The current package (in case your project represents a package (not an app) always gets installed to _lib_ in editable mode.
+The application can include a co-located package by declaring `-e .` in the appropriate dependency list. Like other editable dependencies, it is then represented in _lib_ by metadata pointing to its source files.
 
 
 ### Runtime environment
@@ -157,9 +157,8 @@ minny --port COM4 deploy
 Under the hood, this command performs the following steps:
 
 1. Perform a `minny sync` to make sure the _.minny/lib_ folder is in sync with your project specification.
-2. Transfer all dependencies to your device's `lib` folder. By default, Minny compiles .py files to .mpy files on the fly.
-3. If the project itself represents a package, build it and transfer the files to the `lib` folder, just like the dependencies. (TODO: explain editable installs in sync section)
-4. Copy the main files (e.g., _main.py_, _code.py_, _boot.py_, and helper modules) to the device's main folder, according to the deploy rules specified in _pyproject.toml_.
+2. Transfer all explicitly declared packages to your device's `lib` folder, including a co-located package declared with `-e .`. By default, Minny compiles .py files to .mpy files on the fly.
+3. Copy the main files (e.g., _main.py_, _code.py_, _boot.py_, and helper modules) to the device's main folder, according to the deploy rules specified in _pyproject.toml_.
 
 Now you can press Ctrl-D on your device and test your program. If you're not satisfied, edit some files and invoke the same command again—this time it will be faster as only changed files need to be updated on the device.
 

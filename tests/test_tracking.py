@@ -56,7 +56,7 @@ def test_record_file_records_source_info(tmp_path):
     tracked_file_info = tracker.get_tracked_file_info(target_path)
     assert tracked_file_info is not None
     assert tracked_file_info["source_path"] == str(source_path)
-    assert tracked_file_info["source_mtimte"] == source_path.stat().st_mtime
+    assert tracked_file_info["source_mtime"] == source_path.stat().st_mtime
     assert tracked_file_info["module_format"] == "mpy-test"
 
 
@@ -84,3 +84,42 @@ def test_record_file_updates_source_info_when_crc_already_matches(tmp_path):
     assert tracked_file_info is not None
     assert tracked_file_info["source_path"] == str(source_path)
     assert tracked_file_info["module_format"] == "mpy-test"
+
+
+def test_tracking_info_is_loaded_by_new_target_manager(tmp_path):
+    cache_dir = tmp_path / "cache"
+    target_dir = tmp_path / "target"
+    cache_dir.mkdir()
+    target_dir.mkdir()
+    first_path = str(target_dir / "first.py")
+    second_path = str(target_dir / "second.py")
+
+    first_tmgr = DirTargetManager(str(target_dir), str(cache_dir))
+    first_tmgr.tracker.record_file(first_path, zlib.crc32(b"first"))
+
+    second_tmgr = DirTargetManager(str(target_dir), str(cache_dir))
+    assert second_tmgr.tracker.get_tracked_file_info(first_path) == {"crc32": zlib.crc32(b"first")}
+    second_tmgr.tracker.record_file(second_path, zlib.crc32(b"second"))
+
+    third_tmgr = DirTargetManager(str(target_dir), str(cache_dir))
+    assert third_tmgr.tracker.get_tracked_file_info(first_path) is not None
+    assert third_tmgr.tracker.get_tracked_file_info(second_path) is not None
+
+
+def test_nonpersistent_tracking_does_not_create_cookie_or_cache_file(tmp_path):
+    cache_dir = tmp_path / "cache"
+    target_dir = tmp_path / "target"
+    cache_dir.mkdir()
+    target_dir.mkdir()
+    target_path = str(target_dir / "written.py")
+    tmgr = DirTargetManager(
+        str(target_dir),
+        str(cache_dir),
+        persistent_tracking=False,
+    )
+
+    tmgr.write_file(target_path, b"VALUE = 1\n")
+
+    assert tmgr.tracker.get_tracked_file_info(target_path) is not None
+    assert tmgr.get_existing_tracking_cookie() is None
+    assert not (cache_dir / "devices").exists()

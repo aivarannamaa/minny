@@ -14,7 +14,7 @@ logger = getLogger(__name__)
 class _TrackedFileInfo(TypedDict):
     crc32: int
     source_path: NotRequired[str]  # allows faster up-to-date checking for file transfers
-    source_mtimte: NotRequired[float]
+    source_mtime: NotRequired[float]
     module_format: NotRequired[str]
 
 
@@ -26,8 +26,14 @@ class Tracker:
     def __init__(self, tmgr: TargetManager, minny_cache_dir: str | None = None):
         self._tmgr = tmgr
         self._minny_cache_dir: str = minny_cache_dir or get_default_minny_cache_dir()
+        self._tracking_info_loaded = False
         self._tracked_files: dict[str, _TrackedFileInfo] = {}  # key is abs target path
         self._tracked_folders: dict[str, _TrackedDirectoryInfo] = {}  # key is abs target path
+
+    def _ensure_tracking_info_loaded(self) -> None:
+        if not self._tracking_info_loaded:
+            self._load_tracking_info()
+            self._tracking_info_loaded = True
 
     def _load_tracking_info(self) -> None:
         path = self._get_tracking_info_path()
@@ -77,9 +83,11 @@ class Tracker:
         return os.path.join(self._minny_cache_dir, "devices", cookie + ".json")
 
     def get_tracked_file_info(self, target_path: str) -> _TrackedFileInfo | None:
+        self._ensure_tracking_info_loaded()
         return self._tracked_files.get(target_path)
 
     def get_tracked_directory_info(self, target_path: str) -> _TrackedDirectoryInfo | None:
+        self._ensure_tracking_info_loaded()
         return self._tracked_folders.get(target_path)
 
     def record_file(
@@ -89,10 +97,11 @@ class Tracker:
         source_abs_path: str | None = None,
         module_format: str | None = None,
     ) -> None:
+        self._ensure_tracking_info_loaded()
         new_file_info = _TrackedFileInfo(crc32=crc32)
         if source_abs_path is not None:
             new_file_info["source_path"] = source_abs_path
-            new_file_info["source_mtimte"] = os.stat(source_abs_path).st_mtime
+            new_file_info["source_mtime"] = os.stat(source_abs_path).st_mtime
         if module_format is not None:
             new_file_info["module_format"] = module_format
 
@@ -104,19 +113,23 @@ class Tracker:
         self._save_tracking_info()
 
     def record_directory(self, target_path: str, info: _TrackedDirectoryInfo) -> None:
+        self._ensure_tracking_info_loaded()
         self._tracked_folders[target_path] = info
         self._save_tracking_info()
 
     def record_created_directory(self, target_path: str) -> None:
+        self._ensure_tracking_info_loaded()
         self._record_in_tracked_parent_directory(target_path, "dir")
         self._save_tracking_info()
 
     def record_removed_file(self, target_path: str) -> None:
+        self._ensure_tracking_info_loaded()
         self._tracked_files.pop(target_path, None)
         self._remove_from_tracked_parent_directory(target_path)
         self._save_tracking_info()
 
     def record_removed_directory(self, target_path: str) -> None:
+        self._ensure_tracking_info_loaded()
         sep = self._tmgr.get_dir_sep()
         child_prefix = target_path.rstrip(sep) + sep
 
@@ -144,3 +157,11 @@ class Tracker:
         parent_path, basename = self._tmgr.split_dir_and_basename(path)
         if basename is not None and parent_path in self._tracked_folders:
             self._tracked_folders[parent_path].pop(basename, None)
+
+
+class DummyTracker(Tracker):
+    def _load_tracking_info(self) -> None:
+        pass
+
+    def _save_tracking_info(self) -> None:
+        pass

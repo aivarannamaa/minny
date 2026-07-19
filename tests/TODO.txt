@@ -1,1 +1,0 @@
-* Test syncing when a package goes from editable mode to normal mode and vice versa

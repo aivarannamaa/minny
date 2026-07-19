@@ -3,19 +3,20 @@ import posixpath
 import urllib.parse
 from logging import getLogger
 
-from minny.common import UserError
+from minny.common import UserError, fetch_git_refs, looks_like_local_dir
 from minny.compiling import Compiler
 from minny.installer import (
     ExtendedSpec,
     Installer,
+    PackageCandidate,
     PackageMetadata,
-    looks_like_local_dir,
 )
 from minny.util import download_and_parse_json, download_bytes, parse_json_file
 
 logger = getLogger(__name__)
 
 MIP_PACKAGE_INDEX_BASE_URL = "https://micropython.org/pi/v2/package/py"
+UNVERSIONED_VERSION = "unversioned"
 
 
 class MipInstaller(Installer):
@@ -79,11 +80,15 @@ class MipInstaller(Installer):
         compiler: Compiler,
         compile: bool = True,
     ) -> PackageMetadata:
-        package_json, package_base, direct_file = self._load_package_data(espec)
+        package_json, package_base, direct_file, resolved_version = self._load_package_data(espec)
 
         if direct_file is not None:
             name, version, files = self._install_direct_file(
-                espec, direct_file, compile=compile, compiler=compiler
+                espec,
+                direct_file,
+                resolved_version,
+                compile=compile,
+                compiler=compiler,
             )
             meta = PackageMetadata(
                 name=name,
@@ -91,13 +96,19 @@ class MipInstaller(Installer):
                 files=files,
                 requirement=espec.extended_spec,
             )
-            return self.finalize_package_install(meta)
+            return self.finalize_package_install(meta, espec)
 
         assert package_json is not None
         assert package_base is not None
 
         name = self._get_package_name(espec, package_json, package_base)
-        version = str(package_json.get("version") or self._get_requested_version(espec) or "0")
+        self.validate_candidate_name(espec, name)
+        version = str(
+            resolved_version
+            or package_json.get("version")
+            or self._get_requested_version(espec)
+            or UNVERSIONED_VERSION
+        )
         meta = PackageMetadata(
             name=name,
             version=version,
@@ -120,30 +131,67 @@ class MipInstaller(Installer):
             )
             meta["files"].append(final_rel_path)
 
-        return self.finalize_package_install(meta)
+        return self.finalize_package_install(meta, espec)
 
-    def is_package_version_compatible(self, espec: ExtendedSpec, version: str) -> bool:
+    def is_package_candidate_compatible(
+        self, espec: ExtendedSpec, candidate: PackageCandidate
+    ) -> bool:
+        if espec.is_local_dir_spec() or espec.editable:
+            return False
+        return self.does_package_candidate_satisfy(espec, candidate)
+
+    def does_package_candidate_satisfy(
+        self, espec: ExtendedSpec, candidate: PackageCandidate
+    ) -> bool:
+        if not self.are_common_candidate_properties_satisfied(espec, candidate):
+            return False
         requested_version = self._get_requested_version(espec)
-        return requested_version is None or requested_version == version
+        if self._is_github_location(espec.plain_spec):
+            requested_version = self._resolve_github_revision(espec.plain_spec)
+        return requested_version is None or requested_version == candidate.version
 
     def get_package_latest_version(self, name: str) -> str | None:
         package_json = download_and_parse_json(self._get_index_package_json_url(name, "latest"))
         version = package_json.get("version")
         return str(version) if version is not None else None
 
+    def get_resolved_installation_spec(
+        self, meta: PackageMetadata, base_dir: str | None = None
+    ) -> str:
+        location = meta.get("location")
+        if (
+            location is not None
+            and base_dir is not None
+            and looks_like_local_dir(location)
+            and not os.path.isabs(location)
+        ):
+            location = os.path.relpath(self._resolve_stored_candidate_location(location), base_dir)
+
+        if location is None:
+            plain_spec = f"{meta['name']}@{meta['version']}"
+        elif self._is_github_location(location):
+            plain_spec = f"{location}@{meta['version']}"
+        else:
+            # Local paths and direct URLs are mutable locators. Their contents
+            # cannot be pinned further with mip's current requirement syntax.
+            plain_spec = location
+
+        return f"-e {plain_spec}" if "editable" in meta else plain_spec
+
     def _parse_plain_spec(self, plain_spec: str) -> ExtendedSpec:
-        if "@" in plain_spec:
-            assert plain_spec.count("@") == 1
-            name, version_or_location = plain_spec.split("@")
-            location = (
-                version_or_location if self._looks_like_location(version_or_location) else None
-            )
+        if self._is_github_location(plain_spec):
+            name = None
+            location, _ = self._split_github_location(plain_spec)
         elif looks_like_local_dir(plain_spec):
             name = None
             location = plain_spec
         elif self._looks_like_location(plain_spec):
             name = None
             location = plain_spec
+        elif "@" in plain_spec:
+            assert plain_spec.count("@") == 1
+            name, _ = plain_spec.split("@")
+            location = None
         else:
             name = plain_spec
             location = None
@@ -158,16 +206,22 @@ class MipInstaller(Installer):
 
     def _load_package_data(
         self, espec: ExtendedSpec
-    ) -> tuple[dict | None, str | None, tuple[str, bytes] | None]:
+    ) -> tuple[dict | None, str | None, tuple[str, bytes] | None, str | None]:
         if espec.location is not None:
-            location = espec.location
+            location = espec.get_resolved_location()
+            assert location is not None
             if self._is_github_location(location):
-                location = self._github_location_to_url(location)
+                resolved_version = self._resolve_github_revision(espec.plain_spec)
+                location = self._github_location_to_url(location, resolved_version)
+            else:
+                resolved_version = None
 
             if looks_like_local_dir(location):
-                return self._load_local_package_data(location)
+                package_json, package_base, direct_file = self._load_local_package_data(location)
+                return package_json, package_base, direct_file, resolved_version
             if self._is_url(location):
-                return self._load_remote_package_data(location)
+                package_json, package_base, direct_file = self._load_remote_package_data(location)
+                return package_json, package_base, direct_file, resolved_version
 
             raise UserError(f"Unsupported mip package location: {location}")
 
@@ -175,7 +229,7 @@ class MipInstaller(Installer):
         version = self._get_requested_version(espec) or "latest"
         package_json_url = self._get_index_package_json_url(espec.name, version)
         package_json = download_and_parse_json(package_json_url)
-        return package_json, self._url_dirname(package_json_url), None
+        return package_json, self._url_dirname(package_json_url), None, None
 
     def _get_index_package_json_url(self, name: str, version: str) -> str:
         return f"{MIP_PACKAGE_INDEX_BASE_URL}/{urllib.parse.quote(name)}/{version}.json"
@@ -219,6 +273,7 @@ class MipInstaller(Installer):
         self,
         espec: ExtendedSpec,
         direct_file: tuple[str, bytes],
+        resolved_version: str | None,
         compile: bool,
         compiler: Compiler,
     ) -> tuple[str, str, list[str]]:
@@ -226,8 +281,8 @@ class MipInstaller(Installer):
         if not file_name.endswith((".py", ".mpy")):
             raise UserError(f"Unsupported mip file: {file_name}")
 
-        name = espec.name or os.path.splitext(file_name)[0]
-        version = self._get_requested_version(espec) or "0"
+        name = espec.name or self._get_source_identity(espec)
+        version = resolved_version or self._get_requested_version(espec) or UNVERSIONED_VERSION
         target_rel_path = file_name
         uploaded_rel_path = self.upload_package_bytes(
             content=content,
@@ -266,7 +321,9 @@ class MipInstaller(Installer):
         if self._is_url(source_ref):
             return source_ref
         if self._is_github_location(source_ref):
-            return self._github_location_to_url(source_ref)
+            revision = self._resolve_github_revision(source_ref)
+            source, _ = self._split_github_location(source_ref)
+            return self._github_location_to_url(source, revision)
         if self._is_url(package_base):
             return urllib.parse.urljoin(package_base.rstrip("/") + "/", source_ref)
         return os.path.normpath(os.path.join(package_base, source_ref))
@@ -299,15 +356,24 @@ class MipInstaller(Installer):
             return espec.name
         if isinstance(package_json.get("name"), str):
             return package_json["name"]
-        return os.path.basename(os.path.abspath(package_base))
+        return self._get_source_identity(espec)
+
+    def _get_source_identity(self, espec: ExtendedSpec) -> str:
+        assert espec.location is not None
+        if looks_like_local_dir(espec.location):
+            resolved_location = espec.get_resolved_location()
+            assert resolved_location is not None
+            return os.path.abspath(resolved_location)
+        return espec.location
 
     def _get_requested_version(self, espec: ExtendedSpec) -> str | None:
-        if "@" not in espec.plain_spec:
+        if self._is_github_location(espec.plain_spec):
+            _, revision = self._split_github_location(espec.plain_spec)
+            return revision
+        if espec.location is not None or "@" not in espec.plain_spec:
             return None
-        name, version_or_location = espec.plain_spec.split("@", maxsplit=1)
-        if name and not self._looks_like_location(version_or_location):
-            return version_or_location
-        return None
+        _, version = espec.plain_spec.split("@", maxsplit=1)
+        return version
 
     def _looks_like_location(self, spec: str) -> bool:
         return looks_like_local_dir(spec) or self._is_url(spec) or self._is_github_location(spec)
@@ -318,7 +384,29 @@ class MipInstaller(Installer):
     def _is_github_location(self, spec: str) -> bool:
         return spec.startswith("github:")
 
-    def _github_location_to_url(self, location: str) -> str:
+    def _split_github_location(self, location: str) -> tuple[str, str | None]:
+        if "@" not in location:
+            return location, None
+        source, revision = location.rsplit("@", maxsplit=1)
+        return source, revision
+
+    def _resolve_github_revision(self, location: str) -> str:
+        source, revision = self._split_github_location(location)
+        path = source[len("github:") :].strip("/")
+        parts = path.split("/", maxsplit=2)
+        if len(parts) < 2:
+            raise UserError(f"Invalid github mip spec: {location}")
+        owner, repo = parts[:2]
+        tags, branches = fetch_git_refs(f"https://github.com/{owner}/{repo}.git")
+        requested_revision = revision or "HEAD"
+        resolved = branches.get(requested_revision) or tags.get(requested_revision)
+        if resolved is None and len(requested_revision) == 40:
+            resolved = requested_revision
+        if resolved is None:
+            raise UserError(f"Could not resolve GitHub revision {requested_revision!r}")
+        return resolved
+
+    def _github_location_to_url(self, location: str, revision: str) -> str:
         path = location[len("github:") :].strip("/")
         parts = path.split("/", maxsplit=2)
         if len(parts) < 2:
@@ -327,7 +415,7 @@ class MipInstaller(Installer):
         package_path = parts[2] if len(parts) == 3 else "package.json"
         if not package_path.endswith((".json", ".py", ".mpy")):
             package_path = posixpath.join(package_path, "package.json")
-        return f"https://raw.githubusercontent.com/{owner}/{repo}/HEAD/{package_path}"
+        return f"https://raw.githubusercontent.com/{owner}/{repo}/{revision}/{package_path}"
 
     def _url_dirname(self, url: str) -> str:
         return url.rsplit("/", maxsplit=1)[0] + "/"

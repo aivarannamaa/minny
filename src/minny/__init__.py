@@ -1,4 +1,5 @@
 import logging
+import os
 import subprocess
 import sys
 import traceback
@@ -22,6 +23,11 @@ def error(msg):
 def main(raw_args: list[str] | None = None) -> int:
     from minny import parser
     from minny.circup import CircupInstaller
+    from minny.conflicts import (
+        find_requirement_conflicts,
+        warn_about_conflicts,
+    )
+    from minny.installer import Installer
     from minny.mip import MipInstaller
     from minny.pip import PipInstaller
     from minny.project import ProjectManager
@@ -51,7 +57,12 @@ def main(raw_args: list[str] | None = None) -> int:
 
             tmgr = DummyTargetManager(cache_dir)
         else:
-            tmgr = create_target_manager(minny_cache_dir=cache_dir, **args_dict)
+            tmgr = create_target_manager(
+                port=args_dict.get("port"),
+                mount=args_dict.get("mount"),
+                dir=args_dict.get("dir"),
+                minny_cache_dir=cache_dir,
+            )
 
         target_dir = args_dict.get("lib_dir", None)
 
@@ -70,7 +81,29 @@ def main(raw_args: list[str] | None = None) -> int:
             command_handler = ProjectManager(project_dir, tmgr, cache_dir)
             method = getattr(command_handler, args.main_command)
 
-        method(**args_dict)
+        if args.main_command in {"pip", "mip", "circup"}:
+            assert isinstance(command_handler, Installer)
+            if args.command == "install":
+                traversal = method(
+                    extended_specs=args.extended_specs,
+                    no_deps=args.no_deps,
+                    compile=args.compile,
+                )
+                requirement_conflicts = find_requirement_conflicts(
+                    command_handler, traversal, os.getcwd()
+                )
+                warn_about_conflicts(
+                    {command_handler.get_installer_name(): requirement_conflicts},
+                    [],
+                )
+            elif args.command == "uninstall":
+                method(packages=args.packages)
+            elif args.command == "list":
+                method(outdated=args.outdated)
+            else:
+                raise AssertionError(f"Unexpected installer command: {args.command}")
+        else:
+            method(**args_dict)
     except KeyboardInterrupt:
         return 1
     except ManagementError as e:

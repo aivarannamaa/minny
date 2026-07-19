@@ -1,6 +1,7 @@
 ## Starting a session
 
 - Read README.md and decisions from docs/adr to get acquainted. No need to mirror your understanding back to me at this point.
+- The main code is in src/minny, tests are in tests.
 
 ## Working style
 
@@ -9,6 +10,7 @@
 - Don't rush with actions! Only start changing code when my last comments imply this. Sometimes I want to get your opinion first.
 - Don't bother with niceties or try to be agreeable. I can handle critique if my idea seems weak.
 - Don't be afraid to hesitate.
+- DON'T START CODING (EVEN ADDING TESTS) WHEN I JUST ASK YOUR OPINION!
 
 ## Validating changes
 

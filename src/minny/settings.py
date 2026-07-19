@@ -8,6 +8,8 @@ from minny.common import UserError
 
 logger = getLogger(__name__)
 
+INSTALLER_NAMES = ("pip", "mip", "circup")
+
 
 @dataclass
 class DependenciesTable:
@@ -43,7 +45,6 @@ class DeployTable:
 
 @dataclass
 class MinnySettings:
-    current_package_installer: str
     dependencies: DependenciesTable
     deploy: DeployTable
 
@@ -54,14 +55,11 @@ class SettingsReader:
             context,
             path,
             {},
-            ["current-package-installer", "dependencies", "deploy"],
+            ["dependencies", "deploy"],
             context_path=context_path,
         )
         table_abs_path = self._join_paths(context_path, path)
         return MinnySettings(
-            current_package_installer=self.read_current_package_installer(
-                table, "current-package-installer", context_path=table_abs_path
-            ),
             dependencies=self.read_minny_dependencies_table(
                 table, "dependencies", context_path=table_abs_path
             ),
@@ -71,9 +69,7 @@ class SettingsReader:
     def read_minny_dependencies_table(
         self, context: Any, path: str, context_path: str
     ) -> DependenciesTable:
-        table = self.read_table(
-            context, path, {}, ["pip", "mip", "circup"], context_path=context_path
-        )
+        table = self.read_table(context, path, {}, list(INSTALLER_NAMES), context_path=context_path)
         table_abs_path = self._join_paths(context_path, path)
 
         return DependenciesTable(
@@ -279,17 +275,6 @@ class SettingsReader:
             return context_path
         else:
             return context_path + "." + path
-
-    def read_current_package_installer(
-        self, context: dict[str, Any], path: str, context_path: str
-    ) -> str:
-        result = self.read_string(context, path, "auto", context_path)
-        allowed_values = ["pip", "circup", "mip", "none", "auto"]
-        if result not in allowed_values:
-            raise UserError(
-                f"{self._join_paths(context_path, path)} must be one of {', '.join(allowed_values)}"
-            )
-        return result
 
 
 def load_minny_settings_from_pyproject_toml(pyproject_toml: dict[str, Any]) -> MinnySettings:

@@ -17,7 +17,7 @@ When a user switches from one project to another, the device may contain leftove
 During deployment, Minny collects the full set of target paths produced by the project deploy:
 
 - files copied from `tool.minny.deploy.files`;
-- package files copied from synced dependencies and the current package;
+- package files copied from synced dependencies, including explicitly declared co-located packages;
 - package metadata and other Minny-controlled metadata needed for deploy.
 
 After uploads are complete, Minny may remove files on the device that are not in the desired deploy set, subject to configured keep rules and user confirmation. This makes obsolete files from previous projects disappear without requiring a full device wipe, while still allowing unchanged files required by the new project to remain in place and avoid re-uploading.

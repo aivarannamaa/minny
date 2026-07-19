@@ -211,3 +211,6 @@ out
 .DS_Store
 
 tests/.cache
+
+# Minny local sync state
+**/.minny/sync-state.json
