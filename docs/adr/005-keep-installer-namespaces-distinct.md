@@ -6,6 +6,18 @@ Status: Draft
 
 Pip distributions, mip packages, and CircuitPython bundle packages use different identities, metadata, and naming rules. Similar names across these ecosystems do not necessarily identify the same package.
 
+Path overlap can also occur legitimately within one installer namespace. For example, the micropython-lib [`html` manifest](https://raw.githubusercontent.com/micropython/micropython-lib/refs/heads/master/python-stdlib/html/manifest.py) declares `string` as a dependency:
+
+```python
+require("string")
+
+package("html")
+```
+
+The published mip index expands this dependency into the [`html` package record](https://micropython.org/pi/v2/package/py/html/latest.json), which contains `string/__init__.py` and `string/templatelib.py` alongside `html/__init__.py`, but no longer contains the dependency link. The standalone [`string` package record](https://micropython.org/pi/v2/package/py/string/latest.json) contains the same two `string` paths. At the time this example was recorded, both records specified the same hashes for these files.
+
+Installing both packages therefore produces overlapping file claims in the `mip` namespace even though the overlap comes from normal index construction and the file contents agree. A package's recorded files may describe a flattened installation closure rather than exclusive ownership of every path.
+
 ### Decision
 
 Dependencies and installed packages remain grouped by installer namespace. Each installer defines its own package identity, canonicalization, resolution, and version semantics.
