@@ -642,12 +642,12 @@ class ProjectSyncer:
 
     def _clean_up_local_lib(self, files_to_keep: list[str]) -> None:
         # Remove orphaned files not part of any package
-        abs_norm_local_paths_to_keep = [
+        abs_norm_local_paths_to_keep = {
             os.path.normpath(
                 os.path.normcase(os.path.join(self._lib_dir, abs_mgr_path.lstrip("/")))
             )
             for abs_mgr_path in files_to_keep
-        ]
+        }
         logger.debug(f"Keeping paths {abs_norm_local_paths_to_keep}")
         # traverse bottom-up so that dirs becoming empty can be removed
         for dirpath, dirnames, filenames in os.walk(self._lib_dir, topdown=False):
