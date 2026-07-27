@@ -5,6 +5,7 @@ import os.path
 import pathlib
 import posixpath
 import zlib
+from enum import Enum, auto
 from logging import getLogger
 
 from minny import get_default_minny_cache_dir
@@ -44,6 +45,11 @@ from minny.target import TargetManager
 from minny.util import parse_toml_file
 
 logger = getLogger(__name__)
+
+
+class ReconciliationResult(Enum):
+    CURRENT = auto()
+    UPDATE_REQUIRED = auto()
 
 
 def get_project_lib_dir(project_dir: str) -> str:
@@ -136,21 +142,21 @@ class ProjectSyncer:
         if upgrade:
             logger.debug("Upgrade requested; installing top-level project requirements")
             self._invalidate_sync_state()
-            sync_state = None
+            reconciliation_result = ReconciliationResult.UPDATE_REQUIRED
         elif self._can_use_fast_path(lock, current_inputs, sync_state, lock_path) and not reinstall:
             logger.debug("Skipping project installation; local sync state is up to date")
+            reconciliation_result = ReconciliationResult.CURRENT
         else:
-            self._reconcile_lock_and_library(
+            reconciliation_result = self._reconcile_lock_and_library(
                 installers,
                 lock,
                 current_inputs,
                 lock_path,
                 reinstall=reinstall,
             )
-            sync_state = self._read_recorded_sync_state()
 
-        if sync_state is None:
-            logger.debug("Sync state is stale; installing top-level project requirements")
+        if reconciliation_result is ReconciliationResult.UPDATE_REQUIRED:
+            logger.debug("Installing top-level project requirements")
             self._invalidate_sync_state()
             # An existing lock was already reinstalled above using exact resolved specs.
             # Reinstall declarations only when there was no lock or upgrade bypassed it.
@@ -190,11 +196,11 @@ class ProjectSyncer:
         current_inputs: dict[str, list[SyncInput]],
         lock_path: str,
         reinstall: bool = False,
-    ) -> None:
+    ) -> ReconciliationResult:
         if lock is None:
             logger.debug("No lock is available")
             self._invalidate_sync_state()
-            return
+            return ReconciliationResult.UPDATE_REQUIRED
 
         replay_matches_lock = True
         if reinstall or not self._library_matches_lock(installers, lock):
@@ -209,9 +215,11 @@ class ProjectSyncer:
         if self._lock_inputs_match(lock, current_inputs) and replay_matches_lock:
             logger.debug("Lock is current; recording the reconciled local library")
             self._write_sync_state(lock_path)
-        else:
-            logger.debug("Lock is stale; project installation is required")
-            self._invalidate_sync_state()
+            return ReconciliationResult.CURRENT
+
+        logger.debug("Lock is stale; project installation is required")
+        self._invalidate_sync_state()
+        return ReconciliationResult.UPDATE_REQUIRED
 
     def _sync_project(
         self,
