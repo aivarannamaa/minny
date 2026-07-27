@@ -1402,6 +1402,51 @@ mip = ["second-package"]
     assert lock_path.read_bytes() == first_lock
 
 
+def test_sync_leaves_no_state_when_writing_updated_lock_fails(tmp_path, monkeypatch):
+    project_dir = tmp_path / "project"
+    cache_dir = tmp_path / "cache"
+    project_dir.mkdir()
+    cache_dir.mkdir()
+    pyproject_path = project_dir / "pyproject.toml"
+    pyproject_path.write_text(
+        """
+[tool.minny.dependencies]
+mip = ["first-package"]
+""",
+        encoding="utf-8",
+    )
+    calls = []
+
+    def create_fake_installer(installer_name, tmgr, minny_cache_dir, target_dir=None):
+        return FakeProjectInstaller(installer_name, project_dir / ".minny" / "lib", calls)
+
+    monkeypatch.setattr("minny.project.create_installer_by_name", create_fake_installer)
+    tmgr = DummyTargetManager(str(cache_dir))
+    ProjectManager(str(project_dir), tmgr, str(cache_dir)).sync()
+    state_path = project_dir / ".minny" / "sync-state.json"
+    lock_path = project_dir / "minny.lock"
+    first_lock = lock_path.read_bytes()
+    assert state_path.is_file()
+
+    pyproject_path.write_text(
+        """
+[tool.minny.dependencies]
+mip = ["second-package"]
+""",
+        encoding="utf-8",
+    )
+
+    def fail_to_write_lock(path, lock):
+        raise RuntimeError("lock write failed")
+
+    monkeypatch.setattr("minny.project.write_sync_lock", fail_to_write_lock)
+    with pytest.raises(RuntimeError, match="lock write failed"):
+        ProjectManager(str(project_dir), tmgr, str(cache_dir)).sync()
+
+    assert not state_path.exists()
+    assert lock_path.read_bytes() == first_lock
+
+
 def test_sync_invokes_installer_when_top_level_inputs_change(tmp_path):
     project_dir = tmp_path / "project"
     packages_dir = tmp_path / "packages"

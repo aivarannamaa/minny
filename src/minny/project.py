@@ -47,9 +47,11 @@ from minny.util import parse_toml_file
 logger = getLogger(__name__)
 
 
-class ReconciliationResult(Enum):
-    CURRENT = auto()
-    UPDATE_REQUIRED = auto()
+class SyncAction(Enum):
+    FINISH = auto()
+    RECORD_CURRENT = auto()
+    REPLAY_LOCK = auto()
+    UPDATE_PROJECT = auto()
 
 
 def get_project_lib_dir(project_dir: str) -> str:
@@ -139,25 +141,35 @@ class ProjectSyncer:
         previous_lock = lock
         sync_state = self._read_recorded_sync_state()
 
-        if upgrade:
-            logger.debug("Upgrade requested; installing top-level project requirements")
+        next_step = self._inspect_sync(
+            installers,
+            lock,
+            current_inputs,
+            sync_state,
+            lock_path,
+            reinstall=reinstall,
+            upgrade=upgrade,
+        )
+
+        if next_step in (SyncAction.REPLAY_LOCK, SyncAction.UPDATE_PROJECT):
             self._invalidate_sync_state()
-            reconciliation_result = ReconciliationResult.UPDATE_REQUIRED
-        elif self._can_use_fast_path(lock, current_inputs, sync_state, lock_path) and not reinstall:
-            logger.debug("Skipping project installation; local sync state is up to date")
-            reconciliation_result = ReconciliationResult.CURRENT
-        else:
-            reconciliation_result = self._reconcile_lock_and_library(
+
+        if next_step is SyncAction.REPLAY_LOCK:
+            assert lock is not None
+            logger.debug("Materializing the lock into the local library")
+            replay_matches_lock = self._materialize_lock(
                 installers,
                 lock,
-                current_inputs,
-                lock_path,
                 reinstall=reinstall,
             )
+            next_step = self._get_next_step_after_replay(
+                lock,
+                current_inputs,
+                replay_matches_lock,
+            )
 
-        if reconciliation_result is ReconciliationResult.UPDATE_REQUIRED:
+        if next_step is SyncAction.UPDATE_PROJECT:
             logger.debug("Installing top-level project requirements")
-            self._invalidate_sync_state()
             # An existing lock was already reinstalled above using exact resolved specs.
             # Reinstall declarations only when there was no lock or upgrade bypassed it.
             reinstall_declared_requirements = reinstall and (upgrade or previous_lock is None)
@@ -169,11 +181,44 @@ class ProjectSyncer:
                 upgrade=upgrade,
             )
             self._warn_about_changed_same_version_packages(previous_lock, lock)
-            write_sync_lock(lock_path, lock)
-            self._write_sync_state(lock_path)
+            self._finalize_sync(lock_path, updated_lock=lock)
+        elif next_step is SyncAction.RECORD_CURRENT:
+            self._finalize_sync(lock_path)
 
         if lock is not None:
             self._warn_about_lock_conflicts(lock)
+
+    def _inspect_sync(
+        self,
+        installers: dict[str, Installer],
+        lock: SyncLock | None,
+        current_inputs: dict[str, list[SyncInput]],
+        sync_state: SyncState | None,
+        lock_path: str,
+        reinstall: bool,
+        upgrade: bool,
+    ) -> SyncAction:
+        if upgrade:
+            logger.debug("Upgrade requested; installing top-level project requirements")
+            return SyncAction.UPDATE_PROJECT
+
+        if not reinstall and self._can_use_fast_path(lock, current_inputs, sync_state, lock_path):
+            logger.debug("Skipping project installation; local sync state is up to date")
+            return SyncAction.FINISH
+
+        if lock is None:
+            logger.debug("No lock is available")
+            return SyncAction.UPDATE_PROJECT
+
+        if reinstall or not self._library_matches_lock(installers, lock):
+            return SyncAction.REPLAY_LOCK
+
+        if self._lock_inputs_match(lock, current_inputs):
+            logger.debug("Lock is current; recording the reconciled local library")
+            return SyncAction.RECORD_CURRENT
+
+        logger.debug("Lock is stale; project installation is required")
+        return SyncAction.UPDATE_PROJECT
 
     def _can_use_fast_path(
         self,
@@ -189,37 +234,18 @@ class ProjectSyncer:
             and sync_state.matches_lock_file(lock_path)
         )
 
-    def _reconcile_lock_and_library(
+    def _get_next_step_after_replay(
         self,
-        installers: dict[str, Installer],
-        lock: SyncLock | None,
+        lock: SyncLock,
         current_inputs: dict[str, list[SyncInput]],
-        lock_path: str,
-        reinstall: bool = False,
-    ) -> ReconciliationResult:
-        if lock is None:
-            logger.debug("No lock is available")
-            self._invalidate_sync_state()
-            return ReconciliationResult.UPDATE_REQUIRED
-
-        replay_matches_lock = True
-        if reinstall or not self._library_matches_lock(installers, lock):
-            logger.debug("Materializing the lock into the local library")
-            self._invalidate_sync_state()
-            replay_matches_lock = self._materialize_lock(
-                installers,
-                lock,
-                reinstall=reinstall,
-            )
-
+        replay_matches_lock: bool,
+    ) -> SyncAction:
         if self._lock_inputs_match(lock, current_inputs) and replay_matches_lock:
             logger.debug("Lock is current; recording the reconciled local library")
-            self._write_sync_state(lock_path)
-            return ReconciliationResult.CURRENT
+            return SyncAction.RECORD_CURRENT
 
         logger.debug("Lock is stale; project installation is required")
-        self._invalidate_sync_state()
-        return ReconciliationResult.UPDATE_REQUIRED
+        return SyncAction.UPDATE_PROJECT
 
     def _sync_project(
         self,
@@ -258,6 +284,11 @@ class ProjectSyncer:
             get_project_sync_state_path(self._project_dir),
             SyncState.for_lock_file(lock_path),
         )
+
+    def _finalize_sync(self, lock_path: str, updated_lock: SyncLock | None = None) -> None:
+        if updated_lock is not None:
+            write_sync_lock(lock_path, updated_lock)
+        self._write_sync_state(lock_path)
 
     def _warn_about_lock_conflicts(self, lock: SyncLock) -> None:
         warn_about_conflicts(
