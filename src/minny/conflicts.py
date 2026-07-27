@@ -12,6 +12,10 @@ from minny.lockfile import (
 logger = getLogger(__name__)
 
 
+def normalize_package_path(path: str) -> str:
+    return posixpath.normpath(path.replace("\\", "/")).lstrip("/")
+
+
 def find_requirement_conflicts(
     installer: Installer,
     traversal: InstallTraversal,
@@ -41,7 +45,11 @@ def find_locked_path_conflicts(
     package_paths = []
     for installer_name, section in lock_sections.items():
         for package in section.packages:
-            paths = package.files + [item.target for item in package.editable_files]
+            paths = (
+                list(package.file_hashes)
+                + package.generated_files
+                + [item.target for item in package.editable_files]
+            )
             package_paths.append((f"{installer_name}:{package.canonical_name}", paths))
     return find_path_conflicts(package_paths)
 
@@ -52,7 +60,7 @@ def find_path_conflicts(
     owners_by_path: dict[str, list[str]] = {}
     for owner, paths in package_paths:
         for path in paths:
-            normalized_path = posixpath.normpath(path.replace("\\", "/")).lstrip("/")
+            normalized_path = normalize_package_path(path)
             owners = owners_by_path.setdefault(normalized_path, [])
             if owner not in owners:
                 owners.append(owner)

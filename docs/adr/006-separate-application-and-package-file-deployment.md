@@ -15,3 +15,9 @@ A co-located package included with `-e .` does not replace or imply deployment o
 ### Consequences
 
 One directory can contain an application and a package used by that application without conflating their target paths or deployment rules.
+
+### Alternatives considered
+
+#### Deploy the project directory as one undifferentiated file tree
+
+This would reduce configuration for simple layouts, but package modules and application entry points have different destinations and selection rules. It would also make including a co-located package implicitly control unrelated files such as `main.py`. Separate deployment rules keep the two roles independent even when their sources share a repository.

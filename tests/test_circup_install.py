@@ -2,6 +2,7 @@ import json
 import os.path
 import shutil
 import tempfile
+from pathlib import Path
 
 import pytest
 from tutils import create_dir_snapshot
@@ -22,12 +23,13 @@ def test_circup_resolved_installation_specs(tmp_path):
 
     assert (
         installer.get_resolved_installation_spec(
-            PackageMetadata(name="adafruit_display_text", version="3.3.4", files=[])
+            PackageMetadata(name="adafruit_display_text", version="3.3.4", file_hashes={})
         )
         == "adafruit_display_text==3.3.4"
     )
 
 
+@pytest.mark.slow
 def test_no_deps_install(snapshot: dict[str, int]):
     # NB! Need to compare to commited state
     cache_dir = tempfile.mkdtemp()
@@ -42,6 +44,7 @@ def test_no_deps_install(snapshot: dict[str, int]):
     shutil.rmtree(cache_dir)
 
 
+@pytest.mark.slow
 def test_with_deps_install(snapshot: dict[str, int]):
     cache_dir = tempfile.mkdtemp()
     lib_dir = os.path.join(cache_dir, "lib")
@@ -89,8 +92,8 @@ py-modules = ["simple_circup"]
 
     assert not (lib_dir / "simple_circup.py").exists()
 
-    meta = json.loads((lib_dir / ".circup" / "simple_circup-1.0.0.meta").read_text())
-    assert meta["files"] == [".circup/simple_circup-1.0.0.meta"]
+    meta = json.loads((lib_dir / ".circup" / "simple_circup.meta").read_text())
+    assert meta["file_hashes"] == {".circup/simple_circup.meta": None}
     assert meta["editable"]["project_path"] == str(package_dir)
     assert meta["editable"]["files"] == {"./simple_circup.py": "simple_circup.py"}
 
@@ -138,7 +141,7 @@ py-modules = ["actual_module"]
 def test_circup_install_accepts_resolved_version_spec(tmp_path, monkeypatch):
     cache_dir = tmp_path / "cache"
     lib_dir = tmp_path / "lib"
-    build_lib_dir = cache_dir / "circup" / "circup" / "builds" / "foo" / "2.0.0" / "lib"
+    build_lib_dir = cache_dir / "circup" / "builds" / "foo" / "2.0.0" / "lib"
     lib_dir.mkdir()
     build_lib_dir.mkdir(parents=True)
     (build_lib_dir / "foo.py").write_text("VALUE = 2\n", encoding="utf-8")
@@ -164,8 +167,52 @@ def test_circup_install_accepts_resolved_version_spec(tmp_path, monkeypatch):
     installer.install(["foo==2.0.0"], compile=False)
 
     assert (lib_dir / "foo.py").read_text(encoding="utf-8") == "VALUE = 2\n"
-    meta = json.loads((lib_dir / ".circup" / "foo-2.0.0.meta").read_text())
+    meta = json.loads((lib_dir / ".circup" / "foo.meta").read_text())
     assert meta["version"] == "2.0.0"
+
+
+def test_circup_reinstall_refreshes_cached_build(tmp_path, monkeypatch):
+    cache_dir = tmp_path / "cache"
+    lib_dir = tmp_path / "lib"
+    build_lib_dir = cache_dir / "circup" / "builds" / "foo" / "1.0.0" / "lib"
+    lib_dir.mkdir()
+    build_lib_dir.mkdir(parents=True)
+    (build_lib_dir / "foo.py").write_text("VALUE = 'cached'\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        minny.circup.CircupInstaller,
+        "_get_bundle_metas",
+        lambda self: {"test-bundle": {"foo": {"repo": "https://example.com/foo"}}},
+    )
+    monkeypatch.setattr(
+        minny.circup,
+        "fetch_git_refs",
+        lambda repo_url: ({"1.0.0": "a"}, {}),
+    )
+    build_calls = []
+
+    def build_bundle_package(self, package_name, repo_url, tag, target_dir):
+        build_calls.append((package_name, repo_url, tag))
+        refreshed_lib_dir = Path(target_dir) / "lib"
+        refreshed_lib_dir.mkdir()
+        (refreshed_lib_dir / "foo.py").write_text("VALUE = 'refreshed'\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        minny.circup.CircupBuilder,
+        "build_bundle_package",
+        build_bundle_package,
+    )
+    installer = CircupInstaller(
+        tmgr=DirTargetManager(str(lib_dir), str(cache_dir)),
+        minny_cache_dir=str(cache_dir),
+        target_dir=None,
+    )
+
+    installer.install(["foo==1.0.0"], compile=False, reinstall=True)
+
+    assert build_calls == [("foo", "https://example.com/foo", "1.0.0")]
+    assert (build_lib_dir / "foo.py").read_text(encoding="utf-8") == "VALUE = 'refreshed'\n"
+    assert (lib_dir / "foo.py").read_text(encoding="utf-8") == "VALUE = 'refreshed'\n"
 
 
 @pytest.mark.parametrize("name", ["foo-bar", "foo.bar", "class"])

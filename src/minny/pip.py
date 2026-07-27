@@ -4,24 +4,22 @@ import os
 import shlex
 import shutil
 import subprocess
-import sys
 import tempfile
 from logging import getLogger
 from pathlib import Path
 
 from packaging.requirements import Requirement
-from packaging.utils import canonicalize_name, canonicalize_version
+from packaging.utils import canonicalize_name
 
-from minny.compiling import Compiler
 from minny.installer import (
     META_ENCODING,
     ExtendedSpec,
     Installer,
     PackageCandidate,
     PackageMetadata,
+    PreparedPackage,
     parse_pip_compatible_plain_spec,
 )
-from minny.util import parse_dist_info_dir_name
 
 logger = getLogger(__name__)
 
@@ -30,24 +28,7 @@ class PipInstaller(Installer):
     def canonicalize_package_name(self, name: str) -> str:
         return canonicalize_name(name)
 
-    def slug_package_name(self, name: str) -> str:
-        return self.canonicalize_package_name(name).replace("-", "_")
-
-    def slug_package_version(self, version: str) -> str:
-        return canonicalize_version(version, strip_trailing_zero=False).replace("-", "_")
-
-    def deslug_package_name(self, name: str) -> str:
-        return name.replace("_", "-")
-
-    def deslug_package_version(self, version: str) -> str:
-        return version.replace("_", "-")
-
-    def _install_package_without_dependencies(
-        self,
-        espec: ExtendedSpec,
-        compiler: Compiler,
-        compile: bool = True,
-    ) -> PackageMetadata:
+    def _prepare_package(self, espec: ExtendedSpec, refresh: bool) -> PreparedPackage:
         logger.debug("Starting single-package pip install")
         target_dir = tempfile.mkdtemp()
 
@@ -57,6 +38,8 @@ class PipInstaller(Installer):
                 os.path.dirname(__file__), "global-pip-overrides.txt"
             )
             args = ["install", "--overrides", global_overrides_path, "--target", target_dir]
+            if refresh:
+                args.append("--refresh")
 
             self._invoke_pip(
                 args + ["--no-deps", espec.plain_spec],
@@ -66,65 +49,42 @@ class PipInstaller(Installer):
 
             assert len(dist_info_dirs) == 1
 
-            self._report_progress("Starting to apply changes to the target.")
+            self._report_progress("Preparing package contents.")
             dist_info_dir = dist_info_dirs[0]
-            meta = self._install_package_from_temp_target(
-                target_dir, dist_info_dir, compile, compiler, espec
+            prepared = self._prepare_package_from_temp_target(
+                target_dir,
+                dist_info_dir,
             )
-            self._report_progress("All changes applied.")
-            return meta
+            self._report_progress("Package prepared.")
+            return prepared
         finally:
             shutil.rmtree(target_dir)
 
-    def get_package_latest_version(self, name: str) -> str | None:
-        # TODO:
-        return None
-
-    def is_package_candidate_compatible(
+    def does_package_candidate_version_satisfy(
         self, espec: ExtendedSpec, candidate: PackageCandidate
     ) -> bool:
-        if espec.is_local_dir_spec() or espec.editable:
-            return False
-        return self.does_package_candidate_satisfy(espec, candidate)
-
-    def does_package_candidate_satisfy(
-        self, espec: ExtendedSpec, candidate: PackageCandidate
-    ) -> bool:
-        if not self.are_common_candidate_properties_satisfied(espec, candidate):
-            return False
         if espec.name is None:
             return True
         requirement = Requirement(espec.plain_spec)
         return candidate.version in requirement.specifier
 
-    def _install_package_from_temp_target(
+    def _prepare_package_from_temp_target(
         self,
         temp_target_dir: str,
         dist_info_dir_name: str,
-        compile: bool,
-        compiler: Compiler,
-        espec: ExtendedSpec,
-    ) -> PackageMetadata:
-        canonical_name, version = parse_dist_info_dir_name(dist_info_dir_name)
-        self._report_progress(f"Copying {canonical_name} {version}")
-
-        meta = self._read_essential_metadata_from_dist_info_dir(temp_target_dir, dist_info_dir_name)
-        self.validate_candidate_name(espec, meta["name"])
-        meta["requirement"] = espec.extended_spec
+    ) -> PreparedPackage:
+        prepared = self._read_essential_metadata_from_dist_info_dir(
+            temp_target_dir, dist_info_dir_name
+        )
+        self._report_progress(f"Reading {prepared.name} {prepared.version}")
 
         rel_paths = read_package_file_paths_from_dist_info_dir(temp_target_dir, dist_info_dir_name)
-        meta["files"] = []
-
         for site_packages_rel_path in rel_paths:
-            final_rel_path = self.upload_package_file(
-                os.path.join(temp_target_dir, site_packages_rel_path),
-                site_packages_rel_path,
-                compile,
-                compiler,
-            )
-            meta["files"].append(final_rel_path)
+            prepared.files[site_packages_rel_path] = Path(
+                temp_target_dir, site_packages_rel_path
+            ).read_bytes()
 
-        return self.finalize_package_install(meta, espec)
+        return prepared
 
     def _list_dist_info_dirs(self, containing_dir: str) -> list[str]:
         return [name for name in os.listdir(containing_dir) if name.endswith(".dist-info")]
@@ -132,10 +92,7 @@ class PipInstaller(Installer):
     def _invoke_pip(self, args: list[str], cwd: str | None = None) -> None:
         pip_cmd = ["uv", "pip", "--quiet"]
 
-        if not self._tty:
-            pip_cmd += ["--color", "never"]
-
-        pip_cmd += args
+        pip_cmd += ["--color", "never"] + args
         logger.debug("Calling uv pip: %s", " ".join(shlex.quote(arg) for arg in pip_cmd))
 
         subprocess.check_call(
@@ -145,10 +102,8 @@ class PipInstaller(Installer):
             cwd=cwd,
         )
 
-    def _report_progress(self, msg: str, end="\n") -> None:
-        if not self._quiet:
-            print(msg, end=end)
-            sys.stdout.flush()
+    def _report_progress(self, msg: str) -> None:
+        print(msg, flush=True)
 
     def get_installer_name(self) -> str:
         return "pip"
@@ -170,7 +125,7 @@ class PipInstaller(Installer):
         self,
         site_packages_dir: str,
         dist_info_dir_name: str,
-    ) -> PackageMetadata:
+    ) -> PreparedPackage:
         dist_info_dir_path = os.path.join(site_packages_dir, dist_info_dir_name)
         metadata_file_path = os.path.join(dist_info_dir_path, "METADATA")
         metadata_text = Path(metadata_file_path).read_text(encoding="utf-8")
@@ -181,9 +136,7 @@ class PipInstaller(Installer):
         version = msg["Version"]
         summary = msg.get("Summary")
 
-        meta = PackageMetadata(name=name, version=version, files=[])
-        if summary is not None:
-            meta["summary"] = summary
+        prepared = PreparedPackage(name=name, version=version, files={}, summary=summary)
 
         project_urls: dict[str, str] = {}
         for value in msg.get_all("Project-URL", []):
@@ -208,7 +161,7 @@ class PipInstaller(Installer):
             project_urls["download"] = deprecated_download_url
 
         if project_urls:
-            meta["project_urls"] = project_urls
+            prepared.project_urls = project_urls
 
         dependencies = msg.get_all("Requires-Dist")
         if dependencies:
@@ -216,9 +169,9 @@ class PipInstaller(Installer):
                 dep for dep in dependencies if not self._should_ignore_dependency(dep)
             ]
             if relevant_dependencies:
-                meta["dependencies"] = relevant_dependencies
+                prepared.dependencies = relevant_dependencies
 
-        return meta
+        return prepared
 
     def _should_ignore_dependency(self, spec: str) -> bool:
         requirement = Requirement(spec)

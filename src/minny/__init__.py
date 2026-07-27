@@ -88,6 +88,8 @@ def main(raw_args: list[str] | None = None) -> int:
                     extended_specs=args.extended_specs,
                     no_deps=args.no_deps,
                     compile=args.compile,
+                    reinstall=args.reinstall,
+                    upgrade=args.upgrade,
                 )
                 requirement_conflicts = find_requirement_conflicts(
                     command_handler, traversal, os.getcwd()

@@ -42,9 +42,7 @@ def get_default_minny_cache_dir() -> str:
 
 
 def looks_like_local_dir(spec: str) -> bool:
-    return (
-        spec.startswith(".") or spec.startswith("/") or spec.startswith("\\") or spec[1:3] == ":\\"
-    )
+    return spec.startswith((".", "/", "\\")) or spec[1:3] == ":\\"
 
 
 def fetch_git_refs(repo_url: str) -> tuple[dict[str, str], dict[str, str]]:
@@ -105,9 +103,11 @@ def download_git_repo_snapshot(repo_url: str, tag: str, target_dir: str) -> None
         snapshot_url = f"{repo_url}/archive/{tag}.tar.gz"
 
     logger.info(f"Downloading {snapshot_url} to {target_dir}")
-    with urllib.request.urlopen(snapshot_url) as resp:
-        with tarfile.open(fileobj=io.BufferedReader(resp), mode="r|gz") as tar:
-            if sys.version_info >= (3, 12):
-                tar.extractall(target_dir, filter="data")
-            else:
-                tar.extractall(target_dir)
+    with (
+        urllib.request.urlopen(snapshot_url) as resp,
+        tarfile.open(fileobj=io.BufferedReader(resp), mode="r|gz") as tar,
+    ):
+        if sys.version_info >= (3, 12):
+            tar.extractall(target_dir, filter="data")
+        else:
+            tar.extractall(target_dir)

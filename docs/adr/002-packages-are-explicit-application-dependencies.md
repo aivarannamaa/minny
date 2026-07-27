@@ -15,3 +15,9 @@ For example, `-e .` in `tool.minny.dependencies.pip`, `mip`, or `circup` include
 ### Consequences
 
 Application deployment and package installation remain separate concepts. Package metadata and transitive package dependencies are processed only after the package has been explicitly requested.
+
+### Alternatives considered
+
+#### Implicitly install a package found at the project root
+
+This would be convenient for projects which are primarily packages, but package metadata does not say whether the package belongs in the application environment or which Minny installer should own it. It could also deploy library code merely because an application repository happens to contain packaging metadata. An explicit dependency removes that ambiguity.

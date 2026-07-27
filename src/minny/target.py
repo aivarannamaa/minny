@@ -1,6 +1,5 @@
 import ast
 import binascii
-import datetime
 import errno
 import io
 import os.path
@@ -646,10 +645,11 @@ class ProperTargetManager(TargetManager, ABC):
         return self._connection
 
     def _get_time_for_rtc(self):
+        now = time.time()
         if self._uses_local_time:
-            return datetime.datetime.now(tz=None).timetuple()
+            return time.localtime(now)
         else:
-            return datetime.datetime.now(tz=datetime.UTC).timetuple()
+            return time.gmtime(now)
 
     def validate_time(self) -> None:
         this_computer = self._get_time_for_rtc()

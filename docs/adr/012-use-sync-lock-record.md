@@ -1,175 +1,86 @@
-## ADR 012: Use local sync state and an optional sync lock
+## ADR 012: Use a sync lock and local materialization state
 
 Status: Draft
 
 ### Context
 
-`minny sync` runs before deploy and run, so it must be cheap when dependency inputs have not changed. Minny also needs a way to repeat previous package choices, but projects should not be required to use a lock file.
+`minny sync` runs before deploy and run, so the unchanged case must be cheap. Minny also needs to record package choices so a dependency environment can be inspected, shared, and recreated.
 
-These needs have different lifecycles. Fast-sync state describes a particular local `.minny/lib`, while a lock describes package choices that may be shared or used to recreate an installation.
+These concerns have different lifecycles. A portable lock describes a project outcome, while a fast path describes one local `.minny/lib`. Combining them would either make the lock machine-specific or give local state authority over dependency resolution.
 
-All installers write to the same library directory. A partial rerun could therefore change which installer wins when packages write the same path, even when installer behavior itself is deterministic.
+All installers write to the same library directory. Updates must therefore preserve the deterministic cross-installer outcome defined by [ADR 005](005-keep-installer-namespaces-distinct.md).
 
 ### Decision
 
-Minny keeps three distinct artifacts:
+Minny keeps three artifacts with distinct roles:
 
-- `.minny/lib` is the installed library.
-- `.minny/sync-state.json` is local fast-sync state.
-- `minny.lock` is an optional portable record of a completed sync.
+- `.minny/lib` is the materialized local library;
+- `minny.lock` is the portable record of the project inputs and completed package outcome;
+- `.minny/sync-state.json` is a machine-local receipt that the exact lock was successfully materialized into this library.
 
-#### Local sync state
+At a high level, sync follows this flow:
 
-`.minny/sync-state.json` records the library identity and the inputs relevant to deciding whether the current installation may be reused.
+1. If the project inputs match the lock and the local receipt identifies that exact lock, trust `.minny/lib` and finish without inspecting package payloads.
+2. Otherwise, compare the library with the lock. If it already matches, restore the local receipt without reinstalling.
+3. If the library does not match, replay the lock's resolved packages without dependency traversal to establish one coherent recorded baseline. A mutable source which now produces a different outcome makes the lock stale.
+4. If the project inputs or replayed outcome no longer match the lock, update from the declared top-level requirements, run the configured installers in their fixed combined order, and record the new combined outcome.
 
-The state is derived local data. Sync invalidates it before changing the library and writes it only after a successful sync, so an interrupted sync cannot authorize the fast path.
+The lock records the project inputs and the final package graph produced by a completed sync. Each package has a resolved installation specification which selects the same candidate when replayed without dependency traversal: a pinned version for an index package, an immutable revision for a hosted source, or the original locator for a mutable source.
 
-#### Optional lock
+The lock also records package file outcomes and conflicts. Package payload hashes make changes in each package's output visible, while conflict records capture the final content left by overlapping packages. Editable source files, local paths, and direct URLs remain inherently mutable; the lock describes their recorded outcome without promising that the same locator will provide the same contents later.
 
-The lock records both the inputs and the final package outcome of a completed installer traversal, including detected conflicts. Inputs are included so Minny can tell whether the recorded outcome still belongs to the current project configuration.
+Replaying the complete lock before an update prevents modified or partially materialized packages from influencing package selection. Running all configured installers with inputs during an update ensures that cleanup, conflict detection, and the replacement lock describe one combined operation rather than a mixture of independently updated namespaces.
 
-Each locked package includes a resolved installation spec. Installing this spec through the package's installer with dependency traversal disabled selects the same package candidate: its package identity, version or immutable revision, location, and editability. For an index package this is normally a version-pinned named requirement. For a hosted source it includes the resolved revision. Local paths, editable projects, and direct URLs remain mutable locators because their current contents cannot be pinned with the supported requirement syntax.
+`sync --reinstall` bypasses the local receipt and replays every package from the existing lock with installer-level reinstall enabled. Replay uses each package's exact resolved installation specification without dependency traversal, so reinstall refreshes and replaces package materializations without upgrading the locked selections. This is intentionally asymmetric with an unconstrained direct command such as `pip install --reinstall foo`: direct install has no locked selection to preserve and may therefore select a newer candidate, while sync preserves the lock until `--upgrade` is requested. If no lock exists, sync freshly selects and installs the declared requirements. If the lock is stale, sync continues through the normal declared-requirement update after refreshing the locked baseline.
 
-Relative local locations in installed package metadata are anchored at `.minny/lib`. Relative local locations in resolved specs are anchored at the project directory containing `minny.lock`, so the lock can be replayed from its own directory.
+`sync --upgrade` bypasses both the local receipt and locked candidate replay, prepares the declared top-level requirements afresh, and allows their complete dependency traversals to select newer compatible candidates. A candidate whose identity, version, source, and installation mode remain unchanged may stay installed. Combining `--upgrade` with `--reinstall` freshly selects from the declared requirements and installs every selected candidate.
 
-The lock is both the recorded outcome of a completed sync and a materialization plan for establishing the baseline of a later sync.
-
-Locking is initially controlled by a built-in boolean constant (TODO). When locking is disabled, sync neither reads nor writes the lock.
-
-#### Fast sync
-
-Without locking, Minny takes the fast path when the current inputs match the local sync state. In this mode Minny trusts the user not to modify the managed library independently of its state.
-
-With locking enabled, the current inputs must also match the lock, installed package metadata must match the locked outcome, and every recorded package file must be present. The provenance requirement stored in installed metadata is ignored for this comparison because replaying a resolved spec changes that field without changing the package outcome. Minny does not compare file contents, so out-of-band modifications to existing files may still be accepted by the fast path.
-
-When the fast-path conditions hold, sync leaves the library, state, and lock unchanged.
-
-If the lock and library are current but local sync state is missing or stale, Minny records fresh sync state without invoking an installer.
-
-#### Lock reconciliation
-
-When a lock is present but the installed package outcomes or recorded files do not match it, Minny first reconciles `.minny/lib` to the lock. For each installer in the fixed order `pip`, `mip`, `circup`, it installs the section's resolved specs in recorded package order with dependency traversal disabled. It then removes files not belonging to the replayed packages.
-
-This happens before checking whether the lock inputs match the current project inputs. The resulting installed packages therefore participate in construction of a replacement lock when the old lock is stale.
-
-Replay can produce a different outcome for mutable local paths, editable projects, and direct URLs. Minny compares the replayed package outcomes with the lock after ignoring requirement provenance. A difference makes the lock stale and requires a project update even when its recorded inputs still match.
-
-#### Project update
-
-When no lock exists, the lock inputs are stale, or lock replay produces a different outcome, Minny invokes every configured installer with non-empty top-level inputs. Installers run in the fixed order `pip`, `mip`, `circup`, as defined by [ADR 005](005-keep-installer-namespaces-distinct.md).
-
-The installers receive the original project specs and no lock preferences. Compatible installed packages provide the baseline preference through ordinary installed-package reuse. An incompatible requirement replaces the installed candidate.
-
-Running all configured installers ensures that a new lock and its conflict reports come entirely from one combined sync operation instead of mixing new results with reconstructed results. After traversal, Minny removes packages and files not reachable from the new top-level requirements.
-
-The fixed installer order determines cross-installer file precedence in a clean library. During incremental reuse, a compatible installed package may be reused without rewriting its files, so the content of a path claimed by multiple installer namespaces is not guaranteed. Minny reports these conflicts; rebuilding the local library establishes the fixed-order outcome.
-
-Sync invalidates local sync state before changing the library. After reconciliation or project update succeeds, it writes a new lock when required and writes local sync state last, so a failed sync cannot leave overpromising local state. A failed update leaves the previous lock unchanged.
+Sync invalidates the local receipt before changing the library and writes it only after the library and lock are consistent. A failed update leaves the previous lock intact and cannot leave a receipt which falsely authorizes the fast path.
 
 ### Consequences
 
-#### Positive
-
-- Fast sync is available without requiring a lock.
-- Local freshness state and portable package outcomes have clear, separate responsibilities.
-- The lock reflects what installers actually produced and can recreate that package baseline.
-- Normal installer traversal needs only installed-package reuse and has no separate lock-preference mechanism.
-- A clean library has deterministic cross-installer file precedence.
-- Writing the combined state last gives sync a simple failure model.
-
-#### Negative
-
-- Inputs are duplicated in local state and in the lock when locking is enabled.
-- Updating a stale lock invokes all configured installers, even when only one installer's inputs changed.
-- A library which differs from a stale lock is first reconciled to that lock and then updated, causing avoidable work in this uncommon case.
-- Unlocked fast sync may overlook out-of-band changes to `.minny/lib`.
-- Locked fast sync checks package metadata and file presence, not file contents.
-- Mutable locators may not reproduce their recorded package outcome and therefore force a project update.
-- Installer order is observable behavior that must remain stable.
-- Locking initially has no user-facing configuration.
+- Repeated sync usually reads only project inputs, the lock, and a small local receipt.
+- The lock is portable project state; the receipt is disposable machine state.
+- A missing receipt causes verification or replay, not an immediate dependency update.
+- Package payload changes can be detected and recorded even when a source reuses a version number.
+- Mutable local paths, editable projects, and direct URLs cannot be made fully reproducible by the lock.
+- Fast sync assumes `.minny/lib` was not modified out of band after the receipt was written.
+- A stale lock or failed verification can cause extra work, including replay followed by update.
+- Updating one namespace may rerun the others to preserve one deterministic combined result.
+- Every synced project has a lock, even when the user does not intend to share it.
+- Reinstall refreshes locked packages without changing their selections, while upgrade deliberately computes new selections from declared requirements.
+- Reinstall and upgrade may both do substantial work across the complete combined package environment.
 
 ### Alternatives considered
 
-#### Use the lock as fast-sync state
+#### Make locking optional or update the lock with a separate command
 
-This would make fast sync depend on a lock and prevent locking from being optional. It would also use a portable package outcome as authority for the freshness of one local installation.
+Optional locking would require local sync state to duplicate the project inputs and completed outcome needed when no lock exists, giving two artifacts overlapping authority. A separate lock command would also repeat much of sync's package discovery, selection, and traversal in a dry-run path. Because sync already computes the outcome, always recording it in the lock keeps one workflow and one authoritative description.
 
-#### Record package outcomes in local sync state
+#### Pass locked candidates to installers as preferences
 
-This would duplicate installed package metadata and, when locking is enabled, the lock. Input freshness is sufficient for unlocked mode because Minny deliberately trusts the managed library.
+Minny previously considered making each installer prefer compatible candidates from the lock during normal dependency traversal. That would add a second preference mechanism alongside ordinary reuse of installed candidates and could mix a reconstructed old outcome with newly selected packages. Replaying the lock first establishes its candidates through normal installed state; a subsequent project update can then use the installers' existing compatibility and replacement rules.
+
+#### Treat the lock as a globally solved dependency graph
+
+The lock records the deterministic traversal outcome described by [ADR 009](009-use-deterministic-permissive-dependency-traversal.md), which may include warned-about requirement conflicts. It can repeat that outcome, but it is not proof that all constraints are jointly satisfiable.
+
+#### Verify the library on every sync
+
+This would detect out-of-band changes more reliably, but deploy and run would hash every package payload even when Minny had just materialized the same lock. The local receipt makes the common case constant-sized.
+
+#### Store inputs and outcomes in local sync state
+
+That information belongs in the portable lock. Duplicating it would create two records with overlapping authority and make it harder to tell which one describes the project.
+
+#### Treat `.minny/lib` as the only state
+
+Installers would have to rediscover whether a traversal is needed on every sync. Installed packages alone also cannot reliably express the original inputs, the selected traversal outcome, or why an early requirement was replaced by a later one.
 
 #### Keep independent per-installer fast paths
 
-This would avoid unnecessary installer work, but a partial rerun could change cross-installer file precedence. Preserving one deterministic combined outcome is more important than optimizing this uncommon case.
+This would avoid some installer work, but a partial rerun could change which package owns an overlapping path. A combined update preserves the same precedence as a clean sync.
 
-#### Use .minny/lib instead of sync state
+#### Require the lock to reproduce mutable sources exactly
 
-In this case the installers should be able to complete quickly when inputs have not changed. This would require tweaking installation compatibility rules for this purpose, possibly making sacrifices. There is no good solution for cases, when a package changes versions during install and the first request is not compatible with the final version.
-
-### Appendix: example files
-
-These examples illustrate the current formats. The serialization code remains the authority for non-essential format details.
-
-#### `.minny/sync-state.json`
-
-```json
-{
-  "installers": {
-    "mip": {
-      "inputs": [
-        {
-          "project_fingerprint": "abc123",
-          "project_path": "../driver",
-          "spec": "-e ../driver"
-        }
-      ]
-    },
-    "pip": {
-      "inputs": [
-        {
-          "spec": "adafruit-circuitpython-ssd1306~=2.12"
-        }
-      ]
-    }
-  },
-  "lib_dir": "/home/alice/project/.minny/lib",
-  "version": 1
-}
-```
-
-#### `minny.lock`
-
-```toml
-version = 1
-
-[[pip.inputs]]
-spec = "adafruit-circuitpython-ssd1306~=2.12"
-
-[[pip.packages]]
-canonical_name = "adafruit-circuitpython-ssd1306"
-version = "2.12.24"
-resolved_spec = "adafruit-circuitpython-ssd1306==2.12.24"
-requirement = "adafruit-circuitpython-ssd1306~=2.12"
-dependencies = ["adafruit-circuitpython-framebuf"]
-files = ["adafruit_ssd1306.py", ".pip/adafruit_circuitpython_ssd1306-2.12.24.meta"]
-
-[[mip.inputs]]
-spec = "-e ../driver"
-project_path = "../driver"
-project_fingerprint = "abc123"
-
-[[mip.packages]]
-canonical_name = "driver"
-version = "1.0.0"
-resolved_spec = "-e ../driver"
-requirement = "-e ../driver"
-files = [".mip/driver-1.0.0.meta"]
-location = "../../../driver"
-editable = true
-project_path = "../driver"
-project_fingerprint = "abc123"
-
-[[mip.packages.editable_files]]
-source = "driver.py"
-target = "driver.py"
-```
+A path, editable project, or direct URL can change without acquiring a new immutable identity. Minny can detect that its outcome changed, but cannot restore bytes the source no longer provides.

@@ -82,9 +82,9 @@ extraPaths = [".minny/lib"]
 
 Besides code completion and type-checking, your IDE should now allow you to Ctrl-click or Command-click from a library function call to its implementation so you can investigate the source code when the documentation is lacking.
 
-> **Note:** If you choose to keep the _lib_ folder under version control, you'll have solid dependency locking in place. If you don't need this, feel free to add the folder to .gitignore and let Minny create and populate it each time someone clones the project and starts working on it.
+Each successful sync writes _minny.lock_, which records the resolved packages and their files. Keep this file under version control to reproduce the selected dependency environment.
 
-Minny also writes _.minny/sync-state.json_, a machine-local record of the dependency inputs associated with the local _lib_ directory. This file is derived state and should not be kept under version control, even when _.minny/lib_ is committed.
+The _.minny/lib_ directory can be recreated from the project configuration and lock, so it normally does not need to be kept under version control. Minny also writes _.minny/sync-state.json_, a machine-local receipt recording the hash of the _minny.lock_ file which it last successfully materialized into the local _lib_ directory. This derived state enables fast repeated syncs and should not be committed (unless you also commit .minny/lib).
 
 #### Type stubs
 

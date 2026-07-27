@@ -17,12 +17,11 @@ from packaging.version import InvalidVersion, Version
 
 from minny import get_default_minny_cache_dir
 from minny.common import UserError, download_git_repo_snapshot, fetch_git_refs
-from minny.compiling import Compiler
 from minny.installer import (
     ExtendedSpec,
     Installer,
     PackageCandidate,
-    PackageMetadata,
+    PreparedPackage,
     parse_pip_compatible_plain_spec,
 )
 from minny.settings import SettingsReader
@@ -84,8 +83,6 @@ class CircupInstaller(Installer):
         super().__init__(tmgr, target_dir, minny_cache_dir)
         self._cache_dir: str = os.path.join(minny_cache_dir, "circup")
         os.makedirs(self._cache_dir, exist_ok=True)
-        self._target_dir = self._tmgr.get_default_target()
-        logger.debug(f"Circup target dir is {self._target_dir}")
         self._bundle_metas: dict[str, dict[str, Any]] | None = None
 
     def _get_bundle_metas(self) -> dict[str, dict[str, Any]]:
@@ -117,58 +114,29 @@ class CircupInstaller(Installer):
         with open(cached_path, "rb") as fp:
             return json.load(fp)
 
-    def _install_package_without_dependencies(
-        self,
-        espec: ExtendedSpec,
-        compiler: Compiler,
-        compile: bool = True,
-    ) -> PackageMetadata:
+    def _prepare_package(self, espec: ExtendedSpec, refresh: bool) -> PreparedPackage:
         if espec.is_local_dir_spec():
-            return self._install_local_package(
-                espec=espec,
-                target_dir=self._target_dir,
-                compile=compile,
-                compiler=compiler,
-            )
+            return self._prepare_local_package(espec)
         else:
-            return self._install_bundle_package(
-                espec=espec,
-                target_dir=self._target_dir,
-                compile=compile,
-                compiler=compiler,
-            )
+            return self._prepare_bundle_package(espec, refresh=refresh)
 
     def get_package_latest_version(self, name: str) -> str | None:
-        bundle_info = self._find_package_bundle_info(name)
-        if bundle_info is not None:
-            return bundle_info.get("version")
+        bundle_entry = self._find_package_bundle_entry(name)
+        if bundle_entry is not None:
+            _, package_info = bundle_entry
+            return package_info.get("version")
         else:
             return None
 
-    def is_package_candidate_compatible(
+    def does_package_candidate_version_satisfy(
         self, espec: ExtendedSpec, candidate: PackageCandidate
     ) -> bool:
-        if espec.is_local_dir_spec() or espec.editable:
-            return False
-        return self.does_package_candidate_satisfy(espec, candidate)
-
-    def does_package_candidate_satisfy(
-        self, espec: ExtendedSpec, candidate: PackageCandidate
-    ) -> bool:
-        if not self.are_common_candidate_properties_satisfied(espec, candidate):
-            return False
         if espec.name is None:
             return True
         requirement = Requirement(espec.plain_spec)
         return Version(candidate.version) in requirement.specifier
 
-    def _install_local_package(
-        self,
-        espec: ExtendedSpec,
-        target_dir: str,
-        compile: bool,
-        compiler: Compiler,
-    ) -> PackageMetadata:
+    def _prepare_local_package(self, espec: ExtendedSpec) -> PreparedPackage:
         source_dir = espec.get_resolved_location()
         assert source_dir is not None
 
@@ -193,37 +161,27 @@ class CircupInstaller(Installer):
                 is_temp_source_dir=False,
             )
 
-            return self._install_built_package(
-                espec,
+            return self._prepare_built_package(
                 temp_build_path,
                 package_name,
                 version,
-                target_dir,
-                compile,
-                compiler,
             )
         finally:
             shutil.rmtree(temp_build_path)
 
-    def _install_bundle_package(
-        self,
-        espec: ExtendedSpec,
-        target_dir: str,
-        compile: bool,
-        compiler: Compiler,
-    ) -> PackageMetadata:
+    def _prepare_bundle_package(
+        self, espec: ExtendedSpec, refresh: bool = False
+    ) -> PreparedPackage:
         requirement = Requirement(espec.plain_spec)
         package_name = requirement.name
 
-        for bundle_id, bundle_meta in self._get_bundle_metas().items():
-            package_bundle_meta = bundle_meta.get(package_name)
-            if package_bundle_meta is not None:
-                print(f"Installing {package_name} from {bundle_id}")
-                break
-        else:
+        bundle_entry = self._find_package_bundle_entry(package_name)
+        if bundle_entry is None:
             raise UserError(
                 f"Could not find package {package_name} from {', '.join(self._get_bundle_metas().keys())}"
             )
+        bundle_id, package_bundle_meta = bundle_entry
+        print(f"Installing {package_name} from {bundle_id}")
 
         repo_url: str = package_bundle_meta["repo"]
         tags = list(
@@ -240,42 +198,49 @@ class CircupInstaller(Installer):
 
         logger.info(f"Installing version {version}")
 
-        build_path: str = os.path.join(self._cache_dir, "circup", "builds", package_name, version)
+        build_path: str = os.path.join(self._cache_dir, "builds", package_name, version)
 
-        if not os.path.isdir(build_path):
-            logger.info("Version not cached yet")
-            CircupBuilder().build_bundle_package(
-                package_name, repo_url, tag=version, target_dir=build_path
-            )
+        if refresh or not os.path.isdir(build_path):
+            logger.info("Refreshing cached version" if refresh else "Version not cached yet")
+            build_parent = os.path.dirname(build_path)
+            os.makedirs(build_parent, exist_ok=True)
+            refreshed_build_path = tempfile.mkdtemp(dir=build_parent)
+            try:
+                CircupBuilder().build_bundle_package(
+                    package_name,
+                    repo_url,
+                    tag=version,
+                    target_dir=refreshed_build_path,
+                )
+                if os.path.isdir(build_path):
+                    shutil.rmtree(build_path)
+                elif os.path.exists(build_path):
+                    os.remove(build_path)
+                os.replace(refreshed_build_path, build_path)
+            finally:
+                shutil.rmtree(refreshed_build_path, ignore_errors=True)
         else:
             logger.info("Version is already in cache")
 
-        return self._install_built_package(
-            espec,
+        return self._prepare_built_package(
             build_path,
             package_name,
             version,
-            target_dir,
-            compile,
-            compiler,
         )
 
-    def _install_built_package(
+    def _prepare_built_package(
         self,
-        espec: ExtendedSpec,
         build_path: str,
         package_name: str,
         version: str,
-        target_dir: str,
-        compile: bool,
-        compiler: Compiler,
-    ) -> PackageMetadata:
+    ) -> PreparedPackage:
         self._validate_package_name(package_name)
         # TODO: add license, summary, urls
-        meta = PackageMetadata(
-            name=package_name, version=version, files=[], requirement=espec.extended_spec
+        prepared = PreparedPackage(
+            name=package_name,
+            version=version,
+            files={},
         )
-        self.validate_candidate_name(espec, package_name)
 
         src_lib_dir = os.path.join(build_path, "lib")
         assert os.path.isdir(src_lib_dir)
@@ -286,20 +251,12 @@ class CircupInstaller(Installer):
             for file_name in files:
                 source_abs_path = os.path.join(root, file_name)
                 target_rel_path = self._tmgr.join_path(rel_root, file_name)
-
-                final_target_rel_path = self.upload_package_file(
-                    source_abs_path,
-                    target_rel_path,
-                    compile,
-                    compiler,
-                    target_dir=target_dir,
-                )
-                meta["files"].append(final_target_rel_path)
+                prepared.files[target_rel_path] = Path(source_abs_path).read_bytes()
 
         deps = self._find_package_deps_from_source(build_path, package_name)
-        meta["dependencies"] = deps
+        prepared.dependencies = deps
 
-        return self.finalize_package_install(meta, espec)
+        return prepared
 
     def _find_package_deps_from_source(self, build_path, package_name) -> list[str]:
         all_reqs = []
@@ -346,11 +303,11 @@ class CircupInstaller(Installer):
         assert pypi_spec.startswith(pypi_name)
         return circup_name + pypi_spec[len(pypi_name) :]
 
-    def _find_package_bundle_info(self, name: str) -> dict[str, Any] | None:
-        for bundle_info in self._get_bundle_metas().values():
-            for package_name, package_info in bundle_info.items():
-                if package_name == name:
-                    return package_info
+    def _find_package_bundle_entry(self, name: str) -> tuple[str, dict[str, Any]] | None:
+        for bundle_id, bundle_info in self._get_bundle_metas().items():
+            package_info = bundle_info.get(name)
+            if package_info is not None:
+                return bundle_id, package_info
 
         return None
 
@@ -369,19 +326,6 @@ class CircupInstaller(Installer):
 
     def canonicalize_package_name(self, name: str) -> str:
         return name
-
-    def slug_package_name(self, name: str) -> str:
-        return name
-
-    def slug_package_version(self, version: str) -> str:
-        assert "_" not in version
-        return version.replace("-", "_")
-
-    def deslug_package_name(self, name: str) -> str:
-        return name
-
-    def deslug_package_version(self, version: str) -> str:
-        return version.replace("_", "-")
 
     def get_normalized_no_deploy_packages(self) -> list[str]:
         return ["circuitpython_typing"]
@@ -428,8 +372,6 @@ class CircupBuilder:
         """
         if version is not None and is_temp_source_dir:
             self._replace_version_placeholders(source_dir, version)
-
-        print("SRC CONTENT", source_dir)
 
         target_lib_dir = os.path.join(target_dir, "lib")
         os.makedirs(target_lib_dir, exist_ok=True)

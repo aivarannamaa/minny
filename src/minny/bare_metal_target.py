@@ -31,7 +31,7 @@ _CP_ENTER_REPL_PHRASES = [
     "Presiona cualquier tecla para entrar al REPL. Usa CTRL-D para recargar.",
     "Drücke eine beliebige Taste um REPL zu betreten. Drücke STRG-D zum neuladen.",
     "Druk een willekeurige toets om de REPL te starten. Gebruik CTRL+D om te herstarten.",
-    "àn rèn hé jiàn jìn rù REPL. shǐ yòng CTRL-D zhòng xīn jiā zǎi ."
+    "àn rèn hé jiàn jìn rù REPL. shǐ yòng CTRL-D zhòng xīn jiā zǎi .",
     "Tekan sembarang tombol untuk masuk ke REPL. Tekan CTRL-D untuk memuat ulang.",
     "Pressione qualquer tecla para entrar no REPL. Use CTRL-D para recarregar.",
     "Tryck på valfri tangent för att gå in i REPL. Använd CTRL-D för att ladda om.",
@@ -648,7 +648,7 @@ class BareMetalTargetManager(ProperTargetManager):
                 "Presiona cualquier tecla para entrar al REPL. Usa CTRL-D para recargar.",
                 "Drücke eine beliebige Taste um REPL zu betreten. Drücke STRG-D zum neuladen.",
                 "Druk een willekeurige toets om de REPL te starten. Gebruik CTRL+D om te herstarten.",
-                "àn rèn hé jiàn jìn rù REPL. shǐ yòng CTRL-D zhòng xīn jiā zǎi ."
+                "àn rèn hé jiàn jìn rù REPL. shǐ yòng CTRL-D zhòng xīn jiā zǎi .",
                 "Tekan sembarang tombol untuk masuk ke REPL. Tekan CTRL-D untuk memuat ulang.",
                 "Pressione qualquer tecla para entrar no REPL. Use CTRL-D para recarregar.",
                 "Tryck på valfri tangent för att gå in i REPL. Använd CTRL-D för att ladda om.",

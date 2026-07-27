@@ -56,6 +56,7 @@ class Compiler:
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
             text=True,
+            check=False,
         )
         if result.returncode != 0:
             raise UserError(f"Compiling {source_path} failed:\n{result.stdout.strip()}\n")

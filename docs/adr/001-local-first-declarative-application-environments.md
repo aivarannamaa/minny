@@ -15,3 +15,9 @@ A Minny project describes a deployable application environment. Local project fi
 ### Consequences
 
 Minny is primarily useful for a local-first workflow. Device-side changes made outside Minny are not treated as project inputs.
+
+### Alternatives considered
+
+#### Treat the device as the source of truth
+
+Minny could inspect an existing device and preserve or import its state. That would make the environment depend on changes which are difficult to review, reproduce on another board, or use without a connected device. Minny instead requires lasting changes to be represented in the local project.

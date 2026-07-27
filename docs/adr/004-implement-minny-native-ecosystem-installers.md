@@ -15,3 +15,9 @@ Minny owns requirement handling, dependency traversal, installed-package metadat
 ### Consequences
 
 `minny pip`, `minny mip`, and `minny circup` are ecosystem-specific, tool-like interfaces rather than wrappers or promises of full behavioral compatibility. Minny assumes responsibility for maintaining these integrations as the upstream ecosystems evolve.
+
+### Alternatives considered
+
+#### Delegate complete installations to the upstream tools
+
+This would reduce Minny-owned installer code, but the tools do not expose one common model for local materialization, installed-file ownership, replacement, cleanup, locking, compilation, and editable deployment. Adapting only their final side effects would leave Minny unable to reason consistently about the combined environment. Minny instead reuses upstream formats and lower-level capabilities while owning the lifecycle it must coordinate.

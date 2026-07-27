@@ -1,7 +1,9 @@
 import dataclasses
 import fnmatch
+import hashlib
 import os.path
 import pathlib
+import posixpath
 import zlib
 from logging import getLogger
 
@@ -12,6 +14,7 @@ from minny.compiling import Compiler
 from minny.conflicts import (
     find_locked_path_conflicts,
     find_requirement_conflicts,
+    normalize_package_path,
     warn_about_conflicts,
 )
 from minny.dir_target import DirTargetManager
@@ -20,9 +23,11 @@ from minny.lockfile import (
     LockEditableFile,
     LockInstallerSection,
     LockPackage,
+    LockPathConflict,
     SyncLock,
     get_project_lock_path,
     read_sync_lock,
+    validate_package_path,
     write_sync_lock,
 )
 from minny.mip import MipInstaller
@@ -40,7 +45,17 @@ from minny.util import parse_toml_file
 
 logger = getLogger(__name__)
 
-LOCKING_ENABLED = True
+
+def get_project_lib_dir(project_dir: str) -> str:
+    return os.path.join(project_dir, ".minny", "lib")
+
+
+def create_project_lib_manager(project_dir: str, minny_cache_dir: str) -> DirTargetManager:
+    return DirTargetManager(
+        get_project_lib_dir(project_dir),
+        minny_cache_dir,
+        persistent_tracking=False,
+    )
 
 
 class ProjectManager:
@@ -51,24 +66,22 @@ class ProjectManager:
         minny_cache_dir: str | None = None,
     ):
         self._project_dir = project_dir
-        self._lib_dir = os.path.join(self._project_dir, ".minny", "lib")
         self._minny_cache_dir = minny_cache_dir or get_default_minny_cache_dir()
-        self._lib_dir_mgr = DirTargetManager(
-            self._lib_dir,
-            self._minny_cache_dir,
-            persistent_tracking=False,
-        )
         self._tmgr = tmgr
         pyproject_toml_path = os.path.join(self._project_dir, "pyproject.toml")
         pyproject_toml = (
             parse_toml_file(pyproject_toml_path) if os.path.isfile(pyproject_toml_path) else {}
         )
         self._minny_settings = load_minny_settings_from_pyproject_toml(pyproject_toml)
-        logger.debug(f"Project dir: {self._project_dir}, lib dir: {self._lib_dir}")
+        logger.debug(
+            "Project dir: %s, lib dir: %s",
+            self._project_dir,
+            get_project_lib_dir(self._project_dir),
+        )
 
-    def sync(self, **kwargs):
+    def sync(self, reinstall: bool = False, upgrade: bool = False, **kwargs):
         logger.info("Syncing project")
-        self._create_syncer().sync()
+        self._create_syncer().sync(reinstall=reinstall, upgrade=upgrade)
 
     def deploy(self, mpy_cross_path: str | None = None, except_main: bool = False, **kwargs):
         self._sync_and_deploy(mpy_cross_path, except_main=except_main)
@@ -85,16 +98,13 @@ class ProjectManager:
     def _create_syncer(self) -> "ProjectSyncer":
         return ProjectSyncer(
             self._project_dir,
-            self._lib_dir,
-            self._lib_dir_mgr,
             self._minny_cache_dir,
             self._minny_settings,
         )
 
     def _create_deployer(self) -> "ProjectDeployer":
         return ProjectDeployer(
-            self._lib_dir,
-            self._lib_dir_mgr,
+            self._project_dir,
             self._minny_cache_dir,
             self._minny_settings,
             self._tmgr,
@@ -105,69 +115,100 @@ class ProjectSyncer:
     def __init__(
         self,
         project_dir: str,
-        lib_dir: str,
-        lib_dir_mgr: DirTargetManager,
         minny_cache_dir: str,
         minny_settings: MinnySettings,
     ):
         self._project_dir = project_dir
-        self._lib_dir = lib_dir
-        self._lib_dir_mgr = lib_dir_mgr
+        self._lib_dir = get_project_lib_dir(project_dir)
+        self._lib_dir_mgr = create_project_lib_manager(project_dir, minny_cache_dir)
         self._minny_cache_dir = minny_cache_dir
         self._minny_settings = minny_settings
 
-    def sync(self):
+    def sync(self, reinstall: bool = False, upgrade: bool = False):
         os.makedirs(self._lib_dir, exist_ok=True)
 
         installers, specs_by_installer, current_inputs = self._collect_sync_context()
-        lock = self._read_previous_lock() if LOCKING_ENABLED else None
+        lock_path = get_project_lock_path(self._project_dir)
+        lock = self._read_previous_lock()
+        previous_lock = lock
         sync_state = self._read_recorded_sync_state()
 
-        if LOCKING_ENABLED:
-            self._reconcile_lock_and_library(installers, lock, current_inputs, sync_state)
+        if upgrade:
+            logger.debug("Upgrade requested; installing top-level project requirements")
+            self._invalidate_sync_state()
+            sync_state = None
+        elif self._can_use_fast_path(lock, current_inputs, sync_state, lock_path) and not reinstall:
+            logger.debug("Skipping project installation; local sync state is up to date")
+        else:
+            self._reconcile_lock_and_library(
+                installers,
+                lock,
+                current_inputs,
+                lock_path,
+                reinstall=reinstall,
+            )
             sync_state = self._read_recorded_sync_state()
 
-        if sync_state is None or not sync_state.matches(self._lib_dir, current_inputs):
+        if sync_state is None:
             logger.debug("Sync state is stale; installing top-level project requirements")
             self._invalidate_sync_state()
-            lock = self._sync_project(installers, specs_by_installer, current_inputs)
-            if LOCKING_ENABLED:
-                write_sync_lock(get_project_lock_path(self._project_dir), lock)
-            self._write_sync_state(current_inputs)
-        else:
-            logger.debug("Skipping project installation; local sync state is up to date")
+            # An existing lock was already reinstalled above using exact resolved specs.
+            # Reinstall declarations only when there was no lock or upgrade bypassed it.
+            reinstall_declared_requirements = reinstall and (upgrade or previous_lock is None)
+            lock = self._sync_project(
+                installers,
+                specs_by_installer,
+                current_inputs,
+                reinstall=reinstall_declared_requirements,
+                upgrade=upgrade,
+            )
+            self._warn_about_changed_same_version_packages(previous_lock, lock)
+            write_sync_lock(lock_path, lock)
+            self._write_sync_state(lock_path)
 
         if lock is not None:
             self._warn_about_lock_conflicts(lock)
+
+    def _can_use_fast_path(
+        self,
+        lock: SyncLock | None,
+        current_inputs: dict[str, list[SyncInput]],
+        sync_state: SyncState | None,
+        lock_path: str,
+    ) -> bool:
+        return (
+            lock is not None
+            and sync_state is not None
+            and self._lock_inputs_match(lock, current_inputs)
+            and sync_state.matches_lock_file(lock_path)
+        )
 
     def _reconcile_lock_and_library(
         self,
         installers: dict[str, Installer],
         lock: SyncLock | None,
         current_inputs: dict[str, list[SyncInput]],
-        sync_state: SyncState | None,
+        lock_path: str,
+        reinstall: bool = False,
     ) -> None:
         if lock is None:
             logger.debug("No lock is available")
             self._invalidate_sync_state()
             return
 
-        library_was_replayed = False
         replay_matches_lock = True
-        if not self._library_matches_lock(installers, lock):
+        if reinstall or not self._library_matches_lock(installers, lock):
             logger.debug("Materializing the lock into the local library")
             self._invalidate_sync_state()
-            replay_matches_lock = self._materialize_lock(installers, lock)
-            library_was_replayed = True
+            replay_matches_lock = self._materialize_lock(
+                installers,
+                lock,
+                reinstall=reinstall,
+            )
 
         if self._lock_inputs_match(lock, current_inputs) and replay_matches_lock:
-            if (
-                library_was_replayed
-                or sync_state is None
-                or not sync_state.matches(self._lib_dir, current_inputs)
-            ):
-                logger.debug("Lock is current; recording the reconciled local library")
-                self._write_sync_state(current_inputs)
+            logger.debug("Lock is current; recording the reconciled local library")
+            self._write_sync_state(lock_path)
         else:
             logger.debug("Lock is stale; project installation is required")
             self._invalidate_sync_state()
@@ -177,6 +218,8 @@ class ProjectSyncer:
         installers: dict[str, Installer],
         specs_by_installer: dict[str, list[str]],
         current_inputs: dict[str, list[SyncInput]],
+        reinstall: bool = False,
+        upgrade: bool = False,
     ) -> SyncLock:
         files_to_keep = []
         lock_sections: dict[str, LockInstallerSection] = {}
@@ -190,19 +233,22 @@ class ProjectSyncer:
                 installers[installer_name],
                 extended_spec_strings,
                 current_inputs[installer_name],
+                reinstall=reinstall,
+                upgrade=upgrade,
             )
             files_to_keep += installer_files_to_keep
             lock_sections[installer_name] = lock_section
 
         path_conflicts = find_locked_path_conflicts(lock_sections)
-        lock = SyncLock(installers=lock_sections, path_conflicts=path_conflicts)
         self._clean_up_local_lib(files_to_keep)
+        self._record_conflict_final_hashes(lock_sections, path_conflicts)
+        lock = SyncLock(installers=lock_sections, path_conflicts=path_conflicts)
         return lock
 
-    def _write_sync_state(self, current_inputs: dict[str, list[SyncInput]]) -> None:
+    def _write_sync_state(self, lock_path: str) -> None:
         write_sync_state(
             get_project_sync_state_path(self._project_dir),
-            SyncState.for_inputs(self._lib_dir, current_inputs),
+            SyncState.for_lock_file(lock_path),
         )
 
     def _warn_about_lock_conflicts(self, lock: SyncLock) -> None:
@@ -210,6 +256,51 @@ class ProjectSyncer:
             {name: section.requirement_conflicts for name, section in lock.installers.items()},
             lock.path_conflicts,
         )
+
+    def _warn_about_changed_same_version_packages(
+        self, previous_lock: SyncLock | None, lock: SyncLock
+    ) -> None:
+        if previous_lock is None:
+            return
+
+        lines = []
+        for installer_name, section in lock.installers.items():
+            previous_packages = {
+                package.canonical_name: package
+                for package in previous_lock.installers.get(
+                    installer_name, LockInstallerSection()
+                ).packages
+            }
+            for package in section.packages:
+                previous_package = previous_packages.get(package.canonical_name)
+                if previous_package is None or previous_package.version != package.version:
+                    continue
+
+                previous_paths = set(previous_package.file_hashes) | set(
+                    previous_package.generated_files
+                )
+                paths = set(package.file_hashes) | set(package.generated_files)
+                added = sorted(paths - previous_paths)
+                removed = sorted(previous_paths - paths)
+                modified = sorted(
+                    path
+                    for path in paths & previous_paths
+                    if previous_package.file_hashes.get(path) != package.file_hashes.get(path)
+                )
+                if not (added or removed or modified):
+                    continue
+
+                lines.append(f"  {installer_name}:{package.canonical_name} {package.version}")
+                for label, changed_paths in (
+                    ("added", added),
+                    ("removed", removed),
+                    ("modified", modified),
+                ):
+                    if changed_paths:
+                        lines.append(f"    {label}: {', '.join(changed_paths)}")
+
+        if lines:
+            logger.warning("Package files changed without a version change:\n%s", "\n".join(lines))
 
     def _invalidate_sync_state(self) -> None:
         pathlib.Path(get_project_sync_state_path(self._project_dir)).unlink(missing_ok=True)
@@ -279,6 +370,9 @@ class ProjectSyncer:
             if missing_file is not None:
                 return False
 
+        if self._get_first_mismatched_locked_package_file(lock) is not None:
+            return False
+
         return True
 
     def _installed_packages_match_lock(
@@ -305,9 +399,15 @@ class ProjectSyncer:
 
         return True
 
-    def _materialize_lock(self, installers: dict[str, Installer], lock: SyncLock) -> bool:
+    def _materialize_lock(
+        self,
+        installers: dict[str, Installer],
+        lock: SyncLock,
+        reinstall: bool = False,
+    ) -> bool:
         files_to_keep = []
         replayed_sections: dict[str, LockInstallerSection] = {}
+        self._remove_locked_package_files(lock)
 
         for installer_name in INSTALLER_NAMES:
             lock_section = lock.installers.get(installer_name, LockInstallerSection())
@@ -320,16 +420,19 @@ class ProjectSyncer:
                 extended_specs=[package.resolved_spec for package in lock_section.packages],
                 project_path=self._project_dir,
                 no_deps=True,
+                reinstall=reinstall,
             )
             packages = traversal.get_reachable_package_metas()
             files_to_keep.extend(
-                file_path for meta in packages.values() for file_path in meta["files"]
+                file_path for meta in packages.values() for file_path in meta["file_hashes"]
             )
             replayed_sections[installer_name] = LockInstallerSection(
                 packages=[self._build_lock_package(installer, meta) for meta in packages.values()]
             )
 
         self._clean_up_local_lib(files_to_keep)
+        replayed_conflicts = find_locked_path_conflicts(replayed_sections)
+        self._record_conflict_final_hashes(replayed_sections, replayed_conflicts)
 
         for installer_name in INSTALLER_NAMES:
             locked_packages = lock.installers.get(installer_name, LockInstallerSection()).packages
@@ -344,7 +447,13 @@ class ProjectSyncer:
             ):
                 return False
 
-        return True
+        return replayed_conflicts == lock.path_conflicts
+
+    def _remove_locked_package_files(self, lock: SyncLock) -> None:
+        for section in lock.installers.values():
+            for package in section.packages:
+                for file_path in [*package.file_hashes, *package.generated_files]:
+                    self._resolve_lib_path(file_path).unlink(missing_ok=True)
 
     def _package_outcomes_match(self, left: LockPackage, right: LockPackage) -> bool:
         return dataclasses.replace(left, requirement=None) == dataclasses.replace(
@@ -356,12 +465,16 @@ class ProjectSyncer:
         installer: Installer,
         espec_strings: list[str],
         inputs: list[SyncInput],
+        reinstall: bool = False,
+        upgrade: bool = False,
     ) -> tuple[list[str], LockInstallerSection]:
         installer_name = installer.get_installer_name()
         logger.debug(f"Invoking {installer_name} for top-level sync requirements")
         traversal = installer.install_for_project(
             extended_specs=espec_strings,
             project_path=self._project_dir,
+            reinstall=reinstall,
+            upgrade=upgrade,
         )
         packages = traversal.get_reachable_package_metas()
         requirement_conflicts = find_requirement_conflicts(installer, traversal, self._project_dir)
@@ -369,7 +482,7 @@ class ProjectSyncer:
         logger.debug(f"Required {installer_name} packages: {', '.join(packages.keys())}")
         files_to_keep = []
         for meta in packages.values():
-            files_to_keep.extend(meta["files"])
+            files_to_keep.extend(meta["file_hashes"])
 
         return files_to_keep, LockInstallerSection(
             inputs=inputs,
@@ -383,8 +496,7 @@ class ProjectSyncer:
         self, lock_section: LockInstallerSection
     ) -> str | None:
         for file_path in self._get_locked_files(lock_section):
-            abs_file_path = os.path.join(self._lib_dir, file_path.lstrip("/"))
-            if not os.path.isfile(abs_file_path):
+            if not self._resolve_lib_path(file_path).is_file():
                 return file_path
 
         return None
@@ -392,8 +504,29 @@ class ProjectSyncer:
     def _get_locked_files(self, lock_section: LockInstallerSection) -> list[str]:
         result = []
         for package in lock_section.packages:
-            result.extend(package.files)
+            result.extend(package.file_hashes)
+            result.extend(package.generated_files)
         return result
+
+    def _get_first_mismatched_locked_package_file(self, lock: SyncLock) -> str | None:
+        conflicts = {conflict.path: conflict for conflict in lock.path_conflicts}
+        expected_hashes: dict[str, str] = {}
+        for section in lock.installers.values():
+            for package in section.packages:
+                for path, package_hash in package.file_hashes.items():
+                    normalized_path = normalize_package_path(path)
+                    conflict = conflicts.get(normalized_path)
+                    if conflict is not None:
+                        if conflict.final_sha256 is not None:
+                            expected_hashes[normalized_path] = conflict.final_sha256
+                    else:
+                        expected_hashes[normalized_path] = package_hash
+
+        for path, expected_hash in expected_hashes.items():
+            if self._compute_local_file_hash(path) != expected_hash:
+                return path
+
+        return None
 
     def _collect_inputs(
         self,
@@ -422,10 +555,18 @@ class ProjectSyncer:
 
     def _build_lock_package(self, installer: Installer, meta: PackageMetadata) -> LockPackage:
         editable = meta.get("editable")
+        file_hashes = {
+            self._canonicalize_lock_package_path(path): file_hash
+            for path, file_hash in meta["file_hashes"].items()
+            if file_hash is not None
+        }
         editable_files = []
         if editable is not None:
             editable_files = [
-                LockEditableFile(source=source, target=target)
+                LockEditableFile(
+                    source=source,
+                    target=self._canonicalize_lock_package_path(target),
+                )
                 for target, source in sorted(editable["files"].items())
             ]
 
@@ -435,13 +576,61 @@ class ProjectSyncer:
             resolved_spec=installer.get_resolved_installation_spec(meta, self._project_dir),
             requirement=meta.get("requirement"),
             dependencies=meta.get("dependencies", []),
-            files=meta["files"],
+            file_hashes=file_hashes,
+            generated_files=[
+                self._canonicalize_lock_package_path(path)
+                for path, file_hash in meta["file_hashes"].items()
+                if file_hash is None
+            ],
             location=meta.get("location"),
             editable=editable is not None,
             project_path=editable["project_path"] if editable is not None else None,
             project_fingerprint=editable["project_fingerprint"] if editable is not None else None,
             editable_files=editable_files,
         )
+
+    @staticmethod
+    def _canonicalize_lock_package_path(path: str) -> str:
+        canonical_path = posixpath.normpath(path.replace(os.path.sep, "/"))
+        validate_package_path(canonical_path)
+        return canonical_path
+
+    def _record_conflict_final_hashes(
+        self,
+        lock_sections: dict[str, LockInstallerSection],
+        path_conflicts: list[LockPathConflict],
+    ) -> None:
+        hashed_paths = {
+            normalize_package_path(path)
+            for section in lock_sections.values()
+            for package in section.packages
+            for path in package.file_hashes
+        }
+        for index, conflict in enumerate(path_conflicts):
+            if conflict.path in hashed_paths:
+                path_conflicts[index] = dataclasses.replace(
+                    conflict,
+                    final_sha256=self._compute_local_file_hash(conflict.path),
+                )
+
+    def _compute_local_file_hash(self, file_path: str) -> str:
+        digest = hashlib.sha256()
+        with self._resolve_lib_path(file_path).open("rb") as source_file:
+            for chunk in iter(lambda: source_file.read(128 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _resolve_lib_path(self, file_path: str) -> pathlib.Path:
+        try:
+            validate_package_path(file_path)
+        except (TypeError, ValueError) as e:
+            raise UserError(str(e)) from e
+
+        lib_dir = pathlib.Path(self._lib_dir).resolve()
+        resolved_path = (lib_dir / file_path).resolve()
+        if not resolved_path.is_relative_to(lib_dir):
+            raise UserError(f"Package path escapes the library directory: {file_path!r}")
+        return resolved_path
 
     def _clean_up_local_lib(self, files_to_keep: list[str]) -> None:
         # Remove orphaned files not part of any package
@@ -466,14 +655,13 @@ class ProjectSyncer:
 class ProjectDeployer:
     def __init__(
         self,
-        lib_dir: str,
-        lib_dir_mgr: DirTargetManager,
+        project_dir: str,
         minny_cache_dir: str,
         minny_settings: MinnySettings,
         tmgr: TargetManager,
     ):
-        self._lib_dir = lib_dir
-        self._lib_dir_mgr = lib_dir_mgr
+        self._lib_dir = get_project_lib_dir(project_dir)
+        self._lib_dir_mgr = create_project_lib_manager(project_dir, minny_cache_dir)
         self._minny_cache_dir = minny_cache_dir
         self._minny_settings = minny_settings
         self._tmgr = tmgr
@@ -580,14 +768,12 @@ class ProjectDeployer:
             )
             deployed_files.append(final_target_rel_path)
 
-        rel_metadata_path = source_installer.get_relative_metadata_path(
-            source_package_info.name, source_package_info.version
-        )
+        rel_metadata_path = source_installer.get_relative_metadata_path(source_package_info.name)
         deployed_files.append(rel_metadata_path)
-        recipe.metadata["files"] = deployed_files
-        self._tmgr.ensure_dir_and_write_file(
-            self._tmgr.join_path(destination, rel_metadata_path),
+        recipe.metadata["file_hashes"] = dict.fromkeys(deployed_files)
+        self._smart_deploy_content(
             source_installer.compile_package_metadata(recipe.metadata),
+            self._tmgr.join_path(destination, rel_metadata_path),
         )
         return deployed_files
 
@@ -631,7 +817,25 @@ class ProjectDeployer:
         else:
             content = pathlib.Path(source_abs_path).read_bytes()
 
+        self._smart_deploy_content(
+            content,
+            target_path,
+            source_abs_path=source_abs_path,
+            module_format=module_format,
+            announce_write=True,
+        )
+        return target_rel_path
+
+    def _smart_deploy_content(
+        self,
+        content: bytes,
+        target_path: str,
+        source_abs_path: str | None = None,
+        module_format: str | None = None,
+        announce_write: bool = False,
+    ) -> None:
         source_crc32 = zlib.crc32(content)
+        file_info = self._tmgr.tracker.get_tracked_file_info(target_path)
         if file_info is None or file_info["crc32"] != source_crc32:
             actual_target_crc32 = self._tmgr.try_get_crc32(target_path)
             if actual_target_crc32 == source_crc32:
@@ -639,7 +843,8 @@ class ProjectDeployer:
             else:
                 logger.debug(f"CRC-s don't match: {actual_target_crc32} vs {source_crc32}")
                 logger.info(f"Writing {len(content)} bytes to '{target_path}')")
-                print(f"Writing to {target_path}")
+                if announce_write:
+                    print(f"Writing to {target_path}")
                 self._tmgr.ensure_dir_and_write_file(target_path, content)
         else:
             logger.debug(f"Skip writing to '{target_path}' (recorded crc32 not changed)")
@@ -650,7 +855,6 @@ class ProjectDeployer:
             source_abs_path=source_abs_path,
             module_format=module_format,
         )
-        return target_rel_path
 
 
 def create_installer_by_name(

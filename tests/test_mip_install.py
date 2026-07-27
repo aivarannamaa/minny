@@ -18,7 +18,7 @@ def test_mip_resolved_installation_specs(tmp_path):
 
     assert (
         installer.get_resolved_installation_spec(
-            PackageMetadata(name="logging", version="1.2.3", files=[])
+            PackageMetadata(name="logging", version="1.2.3", file_hashes={})
         )
         == "logging@1.2.3"
     )
@@ -28,7 +28,7 @@ def test_mip_resolved_installation_specs(tmp_path):
                 name="driver",
                 version="0123456789abcdef0123456789abcdef01234567",
                 location="github:example/driver",
-                files=[],
+                file_hashes={},
             )
         )
         == "github:example/driver@0123456789abcdef0123456789abcdef01234567"
@@ -44,7 +44,7 @@ def test_mip_resolved_installation_specs(tmp_path):
                     "project_fingerprint": "abc",
                     "files": {},
                 },
-                files=[],
+                file_hashes={},
             )
         )
         == "-e ../../../driver"
@@ -60,7 +60,7 @@ def test_mip_resolved_installation_specs(tmp_path):
                     "project_fingerprint": "abc",
                     "files": {},
                 },
-                files=[],
+                file_hashes={},
             ),
             str(project_dir),
         )
@@ -113,11 +113,17 @@ def test_local_mip_package_with_dependency(tmp_path):
     assert (lib_dir / "root_mod.py").read_text(encoding="utf-8") == "ROOT = True\n"
     assert (lib_dir / "dep_mod.py").read_text(encoding="utf-8") == "DEP = True\n"
 
-    root_meta = json.loads((lib_dir / ".mip" / "root%2Dpkg-2.0.0.meta").read_text())
-    dep_meta = json.loads((lib_dir / ".mip" / "dep%2Dpkg-1.0.0.meta").read_text())
+    root_meta = json.loads((lib_dir / ".mip" / "root-pkg.meta").read_text())
+    dep_meta = json.loads((lib_dir / ".mip" / "dep-pkg.meta").read_text())
     assert root_meta["dependencies"] == [str(dep_pkg)]
-    assert root_meta["files"] == ["root_mod.py", ".mip/root%2Dpkg-2.0.0.meta"]
-    assert dep_meta["files"] == ["dep_mod.py", ".mip/dep%2Dpkg-1.0.0.meta"]
+    assert root_meta["file_hashes"] == {
+        "root_mod.py": None,
+        ".mip/root-pkg.meta": None,
+    }
+    assert dep_meta["file_hashes"] == {
+        "dep_mod.py": None,
+        ".mip/dep-pkg.meta": None,
+    }
 
 
 def test_editable_local_mip_package_uses_package_json_mapping(tmp_path):
@@ -150,10 +156,29 @@ def test_editable_local_mip_package_uses_package_json_mapping(tmp_path):
 
     assert not (lib_dir / "target.py").exists()
 
-    meta = json.loads((lib_dir / ".mip" / "editable%2Dpkg-1.0.0.meta").read_text())
-    assert meta["files"] == [".mip/editable%2Dpkg-1.0.0.meta"]
+    meta = json.loads((lib_dir / ".mip" / "editable-pkg.meta").read_text())
+    assert meta["file_hashes"] == {".mip/editable-pkg.meta": None}
     assert meta["editable"]["project_path"] == str(package_dir)
     assert meta["editable"]["files"] == {"target.py": "source.py"}
+
+
+def test_editable_local_mip_package_does_not_map_source_outside_project(tmp_path, caplog):
+    package_dir = tmp_path / "package"
+    package_dir.mkdir()
+    (package_dir / "package.json").write_text(
+        json.dumps({"urls": [["target.py", "subdir/../../secret.py"]]}),
+        encoding="utf-8",
+    )
+    installer = MipInstaller(
+        tmgr=DirTargetManager(str(tmp_path / "lib"), str(tmp_path / "cache")),
+        target_dir=None,
+        minny_cache_dir=str(tmp_path / "cache"),
+    )
+
+    mapping = installer.compute_files_mapping(str(package_dir), ["target.py"])
+
+    assert mapping == {}
+    assert "Not registering" in caplog.text
 
 
 def test_editable_local_mip_package_is_recomputed_on_repeated_install(tmp_path):
@@ -199,7 +224,7 @@ def test_editable_local_mip_package_is_recomputed_on_repeated_install(tmp_path):
 
     installer.install([f"-e {package_dir}"], compile=False)
 
-    meta = json.loads((lib_dir / ".mip" / "editable%2Dpkg-1.0.0.meta").read_text())
+    meta = json.loads((lib_dir / ".mip" / "editable-pkg.meta").read_text())
     assert meta["editable"]["files"] == {"target.py": "renamed_source.py"}
 
 
@@ -288,7 +313,7 @@ def test_mip_install_accepts_resolved_version_spec(tmp_path, monkeypatch):
 
     assert requested_urls == ["https://micropython.org/pi/v2/package/py/foo/2.0.0.json"]
     assert (lib_dir / "foo.py").read_text(encoding="utf-8") == "VALUE = 1\n"
-    meta = json.loads((lib_dir / ".mip" / "foo-2.0.0.meta").read_text())
+    meta = json.loads((lib_dir / ".mip" / "foo.meta").read_text())
     assert meta["version"] == "2.0.0"
 
 
@@ -320,16 +345,102 @@ def test_mip_uses_compatible_installed_package_until_exact_spec_replaces_it(tmp_
 
     installer.install(["foo"], compile=False)
     assert requested_urls == []
-    assert (lib_dir / ".mip" / "foo-1.0.0.meta").is_file()
+    assert (lib_dir / ".mip" / "foo.meta").is_file()
 
     installer.install(["foo@2.0.0"], compile=False)
     assert requested_urls == ["https://micropython.org/pi/v2/package/py/foo/2.0.0.json"]
-    assert not (lib_dir / ".mip" / "foo-1.0.0.meta").exists()
-    assert (lib_dir / ".mip" / "foo-2.0.0.meta").is_file()
+    meta_paths = list((lib_dir / ".mip").glob("*.meta"))
+    assert meta_paths == [lib_dir / ".mip" / "foo.meta"]
+    assert json.loads(meta_paths[0].read_text())["version"] == "2.0.0"
 
     requested_urls.clear()
     installer.install(["foo@2.0.0"], compile=False)
     assert requested_urls == []
+
+
+def test_mip_reinstall_and_upgrade_resolve_original_requirement(tmp_path, monkeypatch):
+    cache_dir = tmp_path / "cache"
+    lib_dir = tmp_path / "lib"
+    cache_dir.mkdir()
+    lib_dir.mkdir()
+    requested_versions = []
+
+    def mock_download_and_parse_json(url):
+        requested_version = url.rsplit("/", maxsplit=1)[1].removesuffix(".json")
+        requested_versions.append(requested_version)
+        version = "2.0.0" if requested_version == "latest" else requested_version
+        return {
+            "name": "foo",
+            "version": version,
+            "urls": [["foo.py", "https://example.com/foo.py"]],
+        }
+
+    monkeypatch.setattr(minny.mip, "download_and_parse_json", mock_download_and_parse_json)
+    monkeypatch.setattr(minny.mip, "download_bytes", lambda url: b"VALUE = 1\n")
+
+    installer = MipInstaller(
+        tmgr=DirTargetManager(str(lib_dir), str(cache_dir)),
+        target_dir=None,
+        minny_cache_dir=str(cache_dir),
+    )
+    installer.install(["foo@1.0.0"], compile=False)
+    (lib_dir / "foo.py").unlink()
+    requested_versions.clear()
+
+    installer.install(["foo"], compile=False, reinstall=True)
+
+    assert requested_versions == ["latest"]
+    meta_path = lib_dir / ".mip" / "foo.meta"
+    assert json.loads(meta_path.read_text())["version"] == "2.0.0"
+
+    installer.install(["foo@1.0.0"], compile=False)
+    requested_versions.clear()
+    installer.install(["foo"], compile=False, upgrade=True)
+
+    assert requested_versions == ["latest"]
+    assert json.loads(meta_path.read_text())["version"] == "2.0.0"
+
+    installer.install(["foo@1.0.0"], compile=False)
+    requested_versions.clear()
+    installer.install(["foo@1.0.0"], compile=False, reinstall=True)
+
+    assert requested_versions == ["1.0.0"]
+    assert json.loads(meta_path.read_text())["version"] == "1.0.0"
+
+
+def test_upgrade_reuses_same_selected_candidate_unless_reinstall_is_also_requested(
+    tmp_path, monkeypatch
+):
+    cache_dir = tmp_path / "cache"
+    lib_dir = tmp_path / "lib"
+    cache_dir.mkdir()
+    lib_dir.mkdir()
+    package_content = b"VALUE = 1\n"
+
+    monkeypatch.setattr(
+        minny.mip,
+        "download_and_parse_json",
+        lambda url: {
+            "name": "foo",
+            "version": "1.0.0",
+            "urls": [["foo.py", "https://example.com/foo.py"]],
+        },
+    )
+    monkeypatch.setattr(minny.mip, "download_bytes", lambda url: package_content)
+
+    installer = MipInstaller(
+        tmgr=DirTargetManager(str(lib_dir), str(cache_dir)),
+        target_dir=None,
+        minny_cache_dir=str(cache_dir),
+    )
+    installer.install(["foo"], compile=False)
+    package_content = b"VALUE = 2\n"
+
+    installer.install(["foo"], compile=False, upgrade=True)
+    assert (lib_dir / "foo.py").read_bytes() == b"VALUE = 1\n"
+
+    installer.install(["foo"], compile=False, reinstall=True)
+    assert (lib_dir / "foo.py").read_bytes() == b"VALUE = 2\n"
 
 
 def test_local_mip_package_spec_is_reinstalled(tmp_path):

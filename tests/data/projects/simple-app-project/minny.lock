@@ -1,0 +1,133 @@
+version = 1
+
+[[path_conflicts]]
+path = "adafruit_bus_device/__init__.py"
+packages = ["pip:adafruit-circuitpython-busdevice", "circup:adafruit_bus_device"]
+final_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+[[path_conflicts]]
+path = "adafruit_bus_device/i2c_device.py"
+packages = ["pip:adafruit-circuitpython-busdevice", "circup:adafruit_bus_device"]
+final_sha256 = "7a5c9b35835f48ecd105cd2bbfd85115d600b892252dbb471c290942677e1565"
+
+[[path_conflicts]]
+path = "adafruit_bus_device/spi_device.py"
+packages = ["pip:adafruit-circuitpython-busdevice", "circup:adafruit_bus_device"]
+final_sha256 = "4c182132f4eb5f387df4ad20f74e1e0ffe9a7e029249ddc87fd1aa1f67a106a8"
+
+[[pip.inputs]]
+spec = "adafruit-circuitpython-ssd1306~=2.12.0"
+
+[[pip.inputs]]
+spec = "-e ."
+project_path = "."
+project_fingerprint = "8cb5871f49b6b6d4b27148767d2c23da348acc1c11d2d09566342b8bb856f8e2"
+
+[[pip.packages]]
+canonical_name = "adafruit-circuitpython-ssd1306"
+version = "2.12.24"
+resolved_spec = "adafruit-circuitpython-ssd1306==2.12.24"
+requirement = "adafruit-circuitpython-ssd1306~=2.12.0"
+dependencies = ["adafruit-circuitpython-busdevice", "adafruit-circuitpython-framebuf"]
+generated_files = [".pip/adafruit-circuitpython-ssd1306.meta"]
+
+[pip.packages.file_hashes]
+"adafruit_ssd1306.py" = "db134e6fb950bd87f40d76f4226f5934473a1b2132eb76661b4abb8dfba0c4f1"
+
+[[pip.packages]]
+canonical_name = "adafruit-circuitpython-busdevice"
+version = "5.2.17"
+resolved_spec = "adafruit-circuitpython-busdevice==5.2.17"
+requirement = "adafruit-circuitpython-busdevice"
+generated_files = [".pip/adafruit-circuitpython-busdevice.meta"]
+
+[pip.packages.file_hashes]
+"adafruit_bus_device/__init__.py" = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+"adafruit_bus_device/i2c_device.py" = "7a5c9b35835f48ecd105cd2bbfd85115d600b892252dbb471c290942677e1565"
+"adafruit_bus_device/spi_device.py" = "4c182132f4eb5f387df4ad20f74e1e0ffe9a7e029249ddc87fd1aa1f67a106a8"
+
+[[pip.packages]]
+canonical_name = "adafruit-circuitpython-framebuf"
+version = "1.6.12"
+resolved_spec = "adafruit-circuitpython-framebuf==1.6.12"
+requirement = "adafruit-circuitpython-framebuf"
+generated_files = [".pip/adafruit-circuitpython-framebuf.meta"]
+
+[pip.packages.file_hashes]
+"adafruit_framebuf.py" = "b9e3802f1ae08ddf4396f562bf2bbd31316425eb62c21b3ebed2208e24c25a92"
+
+[[pip.packages]]
+canonical_name = "simple-app-project"
+version = "1.0.0"
+resolved_spec = "-e ."
+requirement = "-e ."
+generated_files = [".pip/simple-app-project.meta"]
+location = "../.."
+editable = true
+project_path = "../.."
+project_fingerprint = "8cb5871f49b6b6d4b27148767d2c23da348acc1c11d2d09566342b8bb856f8e2"
+
+[[pip.packages.editable_files]]
+source = "dummy.py"
+target = "dummy.py"
+
+[[circup.inputs]]
+spec = "adafruit_character_lcd==3.5.3"
+
+[[circup.packages]]
+canonical_name = "adafruit_character_lcd"
+version = "3.5.3"
+resolved_spec = "adafruit_character_lcd==3.5.3"
+requirement = "adafruit_character_lcd==3.5.3"
+dependencies = ["adafruit_mcp230xx", "adafruit_bus_device", "adafruit_74hc595"]
+generated_files = [".circup/adafruit_character_lcd.meta"]
+
+[circup.packages.file_hashes]
+"adafruit_character_lcd/character_lcd_rgb_i2c.py" = "49c248c978c2b48f9c1999a0ee39ff30401caa8d6ed79450843f7f5e7319c68c"
+"adafruit_character_lcd/__init__.py" = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+"adafruit_character_lcd/character_lcd_i2c.py" = "ab4575a463da08c7fac942eea05d20ba993f5117851464767f22a1d27af65fb8"
+"adafruit_character_lcd/character_lcd_spi.py" = "ca8cf8e2510c1b81367bf9bcdfbcebc9b42ec683493c5f385828667f92d321d6"
+"adafruit_character_lcd/character_lcd.py" = "7e9362ac93fadf03a1870f13125180d5e227fdf86b56a28b28af18f11504eeee"
+
+[[circup.packages]]
+canonical_name = "adafruit_mcp230xx"
+version = "2.6.2"
+resolved_spec = "adafruit_mcp230xx==2.6.2"
+requirement = "adafruit_mcp230xx"
+dependencies = ["adafruit_bus_device"]
+generated_files = [".circup/adafruit_mcp230xx.meta"]
+
+[circup.packages.file_hashes]
+"adafruit_mcp230xx/mcp23xxx.py" = "683f8588dd7d646dd264373225ffb4e674374c55d7648123d6167fd1b4c0413d"
+"adafruit_mcp230xx/mcp230xx.py" = "dda8245d81de3047331d97b248b9e8f426d9d91fcf525373390645e97fc094e4"
+"adafruit_mcp230xx/__init__.py" = "980e649c0e6df53b475d9f04f8e63fdedbbf3c88ee54da71579f255cf6ce5827"
+"adafruit_mcp230xx/mcp23sxx.py" = "bf1a905dda1e220b68af4ef4dbe62cdf9252e1201f6acc4510bea6de6b082047"
+"adafruit_mcp230xx/mcp23017.py" = "baad014d986a4538a7e5e5cbec23060d26d463ea4125c896c5f7cad70822b9b2"
+"adafruit_mcp230xx/mcp23s17.py" = "2684ef44478f79c0379e1031a25d05ddded9c7361e0c2a279d80200433608f56"
+"adafruit_mcp230xx/mcp23016.py" = "74ee0443b2ddde8f14cefc23dc4aff0eff40494796b85641f2d196acaf628b01"
+"adafruit_mcp230xx/mcp23s08.py" = "0e4cece8a5136569e2bdd4ba1dd86cae333ee4e011e40fffc00de82f78e7eece"
+"adafruit_mcp230xx/digital_inout.py" = "f8a43f26f0c0af6c1877ab8f277a34c6fdd29408a8d2ce8b71a87e024a8563ae"
+"adafruit_mcp230xx/mcp23008.py" = "cad5d9db53a42d1565ef64efaeae530ae52bf857a06a889306a814106b249980"
+
+[[circup.packages]]
+canonical_name = "adafruit_bus_device"
+version = "5.2.17"
+resolved_spec = "adafruit_bus_device==5.2.17"
+requirement = "adafruit_bus_device"
+generated_files = [".circup/adafruit_bus_device.meta"]
+
+[circup.packages.file_hashes]
+"adafruit_bus_device/__init__.py" = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+"adafruit_bus_device/i2c_device.py" = "7a5c9b35835f48ecd105cd2bbfd85115d600b892252dbb471c290942677e1565"
+"adafruit_bus_device/spi_device.py" = "4c182132f4eb5f387df4ad20f74e1e0ffe9a7e029249ddc87fd1aa1f67a106a8"
+
+[[circup.packages]]
+canonical_name = "adafruit_74hc595"
+version = "1.5.2"
+resolved_spec = "adafruit_74hc595==1.5.2"
+requirement = "adafruit_74hc595"
+dependencies = ["adafruit_bus_device"]
+generated_files = [".circup/adafruit_74hc595.meta"]
+
+[circup.packages.file_hashes]
+"./adafruit_74hc595.py" = "f9d2079882f7af4f2498167fe911e3b8e0d711f230adf3921f29f5ee2d3033c4"

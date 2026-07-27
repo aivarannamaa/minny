@@ -12,6 +12,10 @@
 - Don't be afraid to hesitate.
 - DON'T START CODING (EVEN ADDING TESTS) WHEN I JUST ASK YOUR OPINION!
 
+## Specifics
+
+- When writing or updating ADR-s, use single physical line per paragraph. The reader will use soft-wrapping.
+
 ## Validating changes
 
 - run `./format-and-check.sh` for formatting and linting. This is cheap to run, so it is recommended to run it after every task or block of tasks.

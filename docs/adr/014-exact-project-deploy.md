@@ -4,57 +4,40 @@ Status: Draft
 
 ### Context
 
-Minny treats a MicroPython or CircuitPython device as the medium for running the current project. This is closer to the Arduino workflow than to treating the device as a shared general-purpose filesystem.
+Minny treats a MicroPython or CircuitPython device primarily as the execution medium for the current project, closer to an Arduino-style workflow than to a shared general-purpose filesystem.
 
-When a user switches from one project to another, the device may contain leftover modules, package files, or application files from the previous project. Keeping those files can cause confusing imports, stale behavior, or duplicate package metadata. Wiping the device first avoids this, but it also removes files that are still useful for the next project and forces Minny to upload them again.
-
-[ADR 013](013-track-written-files.md) defines file tracking, which can use CRC32 and local source information to avoid unnecessary uploads. This tracking is useful for performance, but it is not the conceptual source of deletion authority.
+Additive deployment leaves files from previous projects behind. Stale modules, package files, or metadata can then affect imports and runtime behavior. Wiping the device avoids leftovers but also removes useful unchanged files and persistent runtime data.
 
 ### Decision
 
-`minny deploy` performs exact deployment: after resolving the current project's deployment rules, Minny treats the declared deploy result as the desired state of the device within deploy-controlled areas.
+`minny deploy` reconciles the device areas covered by the project's deployment rules and Minny's managed package locations. The desired set contains selected application files, synced package files, and required Minny metadata. After required uploads, an existing file in those areas which is absent from the desired set becomes a deletion candidate.
 
-During deployment, Minny collects the full set of target paths produced by the project deploy:
+Project `keep` rules remove paths from the deletion candidates. They protect persistent data, secrets, configuration, logs, and other files which are intentionally outside the deploy result. The default is an empty keep list, consistent with the project-owned-device model, although Minny may protect metadata required for its own operation. Protecting the root path with `keep = ["/"]` opts a project out of pruning while retaining the rest of deployment.
 
-- files copied from `tool.minny.deploy.files`;
-- package files copied from synced dependencies, including explicitly declared co-located packages;
-- package metadata and other Minny-controlled metadata needed for deploy.
+Deletion is never silent. Interactive deployment shows the proposed deletions and asks for confirmation. Non-interactive deployment requires explicit confirmation, and a one-run option can request additive deployment instead.
 
-After uploads are complete, Minny may remove files on the device that are not in the desired deploy set, subject to configured keep rules and user confirmation. This makes obsolete files from previous projects disappear without requiring a full device wipe, while still allowing unchanged files required by the new project to remain in place and avoid re-uploading.
-
-The project configuration has a `tool.minny.deploy.keep` setting for paths that must survive pruning even when they are not produced by the deploy. It is intended for persistent runtime data, local secrets, configuration files, logs, and other files intentionally outside the deploy result. The default fits Minny's project-owned-device model, so `keep` defaults to an empty list. Minny's own required metadata paths may still be protected internally. Setting `keep = ["/"]` is the simple project-level escape hatch from the device-as-medium approach: it protects the whole device tree from pruning while leaving the rest of deploy behavior intact.
-
-If a deploy would delete files, Minny must not silently remove them. In an interactive terminal, it should show the deletion list and ask for confirmation. In non-interactive contexts, it should refuse to delete unless the user has provided an explicit command-line confirmation such as `--yes`. A command-line escape hatch such as `--no-delete` should allow additive deployment when the user does not want reconciliation for a particular run.
-
-File tracking remains an optimization for deciding whether a desired file already has the correct content. It is not the source of pruning authority. If the local tracking cookie is missing or replaced, Minny may need to scan the target file tree to know what currently exists, but deletion authority still comes from the project deploy rules and the user's confirmation.
+File tracking from [ADR 013](013-track-written-files.md) can avoid uploading desired files whose contents are already correct. It is an optimization, not the source of deletion authority. The project rules define desired state, and user confirmation authorizes removal.
 
 ### Consequences
 
-#### Positive
-
-- Deploying a project makes the device match the project more closely, reducing stale imports and confusing leftovers from earlier projects.
-- Users can switch projects without wiping the whole device and without re-uploading unchanged shared files.
-- The model is easy to explain: the device is the execution medium for the current project, and deploy reconciles it to the project.
-- Persistent device-local files remain possible through explicit `keep` rules.
-
-#### Negative
-
-- Exact deploy is more destructive than additive file copying.
-- Users must understand that files not produced by deploy may be removed unless protected with `keep`.
-- Minny needs a reliable way to enumerate target files in deploy-controlled areas, which can be slow on some serial transports.
-- Minny must accumulate the desired paths for the whole deployment before pruning, so one deploy block does not delete files needed by another block.
-- Confirmation prompts and non-interactive behavior add CLI complexity.
+- Switching projects removes stale files without requiring a full device wipe.
+- Unchanged files shared by two projects can remain in place and avoid re-uploading.
+- Persistent device-local files require explicit keep rules.
+- Exact deploy is more destructive than additive copying and requires clear previews and confirmation.
+- Minny must enumerate relevant target files, which may be slow on serial transports.
+- Desired paths must be collected across the whole deployment before anything is pruned.
+- Non-interactive deletion and one-run opt-out behavior add CLI surface area.
 
 ### Alternatives considered
 
-#### Keep package cleanup based on package metadata or tracker state
+#### Track and remove only previously deployed files
 
-Minny could delete obsolete package files by remembering the files belonging to the previous version of each package. This avoids scanning broader deploy scopes in the common case.
+Package metadata or deployment tracking could identify files known to belong to an earlier deploy. This would miss unrelated leftovers and would make the tracker, rather than the current project, the authority for device contents.
 
-This does not solve project-level leftovers, and it does not match the desired model where deploy reconciles the device to the current project.
+#### Wipe the device before deployment
+
+A wipe produces a clean target but needlessly removes persistent data and forces every required file to be uploaded again.
 
 #### Disable pruning by default
 
-Minny could default to preserving everything and require users to opt in to pruning with configuration or a command-line flag.
-
-This is safer for devices treated as shared filesystems, but it undercuts the project-owned-device model. Instead, Minny should make pruning explicit at the moment of deletion by showing the deletion list and requiring confirmation or `--yes`.
+This is safer when the device is treated as a shared filesystem, but it contradicts Minny's project-owned-device model and preserves the stale-file failures exact deploy is meant to prevent. Keep rules and per-run additive deployment provide explicit escape hatches instead.

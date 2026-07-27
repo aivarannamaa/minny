@@ -4,7 +4,9 @@ import fnmatch
 import hashlib
 import json
 import os.path
+import posixpath
 import tempfile
+import urllib.parse
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from logging import getLogger
@@ -18,6 +20,7 @@ from minny import get_default_minny_cache_dir
 from minny.common import UserError, looks_like_local_dir
 from minny.compiling import Compiler
 from minny.dir_target import DirTargetManager
+from minny.lockfile import validate_package_path
 from minny.target import TargetManager
 
 logger = getLogger(__name__)
@@ -82,10 +85,21 @@ class PackageMetadata(TypedDict):
     license: NotRequired[str]
     dependencies: NotRequired[list[str]]
     project_urls: NotRequired[dict[str, str]]
-    files: list[str]
+    file_hashes: dict[str, str | None]
     requirement: NotRequired[str]
     location: NotRequired[str]
     editable: NotRequired[EditableInfo]
+
+
+@dataclass
+class PreparedPackage:
+    name: str
+    version: str
+    files: dict[str, bytes]
+    summary: str | None = None
+    license: str | None = None
+    dependencies: list[str] | None = None
+    project_urls: dict[str, str] | None = None
 
 
 @dataclasses.dataclass
@@ -203,8 +217,6 @@ class Installer(ABC):
         self._tmgr = tmgr
         self._minny_cache_dir = minny_cache_dir or get_default_minny_cache_dir()
         self._custom_target_dir: str | None = target_dir
-        self._quiet = False
-        self._tty = False
 
     def get_target_dir(self) -> str:
         if self._custom_target_dir is not None:
@@ -220,12 +232,17 @@ class Installer(ABC):
         extended_specs: list[str],
         project_path: str,
         no_deps: bool = False,
+        reinstall: bool = False,
+        upgrade: bool = False,
     ) -> InstallTraversal:
         parsed_specs = [self.parse_extended_spec(spec, project_path) for spec in extended_specs]
         return self._install_parsed_specs(
             parsed_specs=parsed_specs,
             no_deps=no_deps,
             compile=False,
+            sync_mode=True,
+            reinstall=reinstall,
+            upgrade=upgrade,
         )
 
     def install(
@@ -234,6 +251,8 @@ class Installer(ABC):
         no_deps: bool = False,
         compile: bool = True,
         mpy_cross: str | None = None,
+        reinstall: bool = False,
+        upgrade: bool = False,
     ) -> InstallTraversal:
         parsed_specs = [self.parse_extended_spec(spec) for spec in extended_specs]
         return self._install_parsed_specs(
@@ -241,6 +260,8 @@ class Installer(ABC):
             no_deps=no_deps,
             compile=compile,
             mpy_cross=mpy_cross,
+            reinstall=reinstall,
+            upgrade=upgrade,
         )
 
     def _install_parsed_specs(
@@ -249,6 +270,9 @@ class Installer(ABC):
         no_deps: bool = False,
         compile: bool = True,
         mpy_cross: str | None = None,
+        sync_mode: bool = False,
+        reinstall: bool = False,
+        upgrade: bool = False,
     ) -> InstallTraversal:
         self._validate_specs(parsed_specs)
 
@@ -265,6 +289,9 @@ class Installer(ABC):
                 compiler=compiler,
                 active_installations=active_installations,
                 traversal=traversal,
+                sync_mode=sync_mode,
+                reinstall=reinstall,
+                upgrade=upgrade,
             )
 
         return traversal
@@ -278,6 +305,9 @@ class Installer(ABC):
         compiler: Compiler,
         active_installations: list[_ActiveInstallation],
         traversal: InstallTraversal,
+        sync_mode: bool,
+        reinstall: bool,
+        upgrade: bool,
     ) -> PackageMetadata:
         active_installation = next(
             (item for item in active_installations if item.espec == espec), None
@@ -292,7 +322,26 @@ class Installer(ABC):
         active_installation = _ActiveInstallation(espec)
         active_installations.append(active_installation)
         try:
-            meta = self.get_compatible_installed_package(espec)
+            installed_meta = self.get_compatible_installed_package(
+                espec,
+                sync_mode=sync_mode,
+            )
+            prepared: PreparedPackage | None = None
+
+            if upgrade or reinstall:
+                prepared = self._prepare_package(espec, refresh=True)
+                prepared_candidate = self._get_prepared_package_candidate(espec, prepared)
+                if (
+                    installed_meta is not None
+                    and not reinstall
+                    and self.get_package_candidate(installed_meta) == prepared_candidate
+                ):
+                    meta = installed_meta
+                else:
+                    meta = None
+            else:
+                meta = installed_meta
+
             if meta is not None:
                 print(f"Using installed package for {espec.plain_spec} ({meta['version']}).")
 
@@ -301,8 +350,9 @@ class Installer(ABC):
                     espec=espec,
                     compile=compile,
                     compiler=compiler,
+                    sync_mode=sync_mode,
+                    prepared=prepared,
                 )
-                meta = self.apply_editable_install(meta, espec)
 
             package_name = self.canonicalize_package_name(meta["name"])
             active_installation.package_name = package_name
@@ -320,6 +370,9 @@ class Installer(ABC):
                         compiler=compiler,
                         active_installations=active_installations,
                         traversal=traversal,
+                        sync_mode=sync_mode,
+                        reinstall=reinstall,
+                        upgrade=upgrade,
                     )
 
             return meta
@@ -330,39 +383,13 @@ class Installer(ABC):
     def get_dependency_specs(self, meta: PackageMetadata, parent_espec: ExtendedSpec) -> list[str]:
         return meta.get("dependencies", [])
 
-    def upload_package_file(
-        self,
-        source_path: str,
-        target_rel_path: str,
-        compile: bool,
-        compiler: Compiler,
-        target_dir: str | None = None,
-    ) -> str:
-        original_target_rel_path = target_rel_path
-        assert "\\" not in original_target_rel_path
-
-        should_compile = compile and target_rel_path.endswith(".py")
-        if should_compile:
-            target_rel_path = target_rel_path[:-3] + ".mpy"
-
-        if should_compile:
-            content = compiler.compile_to_bytes(source_path, original_target_rel_path)
-        else:
-            content = Path(source_path).read_bytes()
-
-        target_path = self._tmgr.join_path(target_dir or self.get_target_dir(), target_rel_path)
-        self._tmgr.ensure_dir_and_write_file(target_path, content)
-        return target_rel_path
-
-    def upload_package_bytes(
+    def _compile_package_file_if_required(
         self,
         content: bytes,
-        source_file_name: str,
         target_rel_path: str,
         compile: bool,
         compiler: Compiler,
-        target_dir: str | None = None,
-    ) -> str:
+    ) -> tuple[str, bytes]:
         original_target_rel_path = target_rel_path
         assert "\\" not in original_target_rel_path
 
@@ -371,7 +398,7 @@ class Installer(ABC):
             target_rel_path = target_rel_path[:-3] + ".mpy"
 
         if should_compile:
-            suffix = os.path.splitext(source_file_name)[1]
+            suffix = os.path.splitext(original_target_rel_path)[1]
             with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as fp:
                 fp.write(content)
                 temp_path = fp.name
@@ -381,64 +408,7 @@ class Installer(ABC):
             finally:
                 os.remove(temp_path)
 
-        target_path = self._tmgr.join_path(target_dir or self.get_target_dir(), target_rel_path)
-        self._tmgr.ensure_dir_and_write_file(target_path, content)
-
-        return target_rel_path
-
-    def finalize_package_install(
-        self, meta: PackageMetadata, espec: ExtendedSpec
-    ) -> PackageMetadata:
-        candidate_location = espec.location
-        if candidate_location is not None:
-            meta["location"] = self._get_stored_candidate_location(
-                candidate_location, espec.base_dir
-            )
-
-        canonical_name = self.canonicalize_package_name(meta["name"])
-        installed_info = self.get_installed_package_info(canonical_name)
-        if installed_info is not None:
-            previous_meta = self.load_package_metadata(installed_info)
-            for previous_file in previous_meta["files"]:
-                if previous_file not in meta["files"]:
-                    previous_path = self._tmgr.join_path(self.get_target_dir(), previous_file)
-                    self._tmgr.remove_file_if_exists(previous_path)
-
-        meta_path = self.get_relative_metadata_path(meta["name"], meta["version"])
-        if meta_path not in meta["files"]:
-            meta["files"].append(meta_path)
-
-        self.save_package_metadata(meta_path, meta)
-        return meta
-
-    def apply_editable_install(self, meta: PackageMetadata, espec: ExtendedSpec) -> PackageMetadata:
-        if not espec.editable:
-            return meta
-
-        assert espec.location is not None
-        resolved_location = espec.get_resolved_location()
-        if resolved_location is None or not os.path.isdir(resolved_location):
-            raise UserError("Editable installs require a local project directory")
-
-        project_path = os.path.abspath(resolved_location)
-        meta_path = self.get_relative_metadata_path(meta["name"], meta["version"])
-        target_files = [path for path in meta["files"] if path != meta_path]
-        editable_files = self.compute_files_mapping(project_path, target_files)
-
-        for target_rel_path in editable_files:
-            if target_rel_path in meta["files"]:
-                target_abs_path = self._tmgr.join_path(self.get_target_dir(), target_rel_path)
-                self._tmgr.remove_file_if_exists(target_abs_path)
-                meta["files"].remove(target_rel_path)
-
-        meta["editable"] = EditableInfo(
-            project_path=self.reanchor_at_lib_dir(espec.location, espec.base_dir),
-            project_fingerprint=self.compute_project_fingerprint(project_path),
-            files=editable_files,
-        )
-
-        self.save_package_metadata(meta_path, meta)
-        return meta
+        return target_rel_path, content
 
     def compute_files_mapping(self, project_path: str, target_files: list[str]) -> dict[str, str]:
         assert os.path.isabs(project_path)
@@ -451,24 +421,112 @@ class Installer(ABC):
 
         return result
 
-    @abstractmethod
     def _install_package_without_dependencies(
         self,
         espec: ExtendedSpec,
         compiler: Compiler,
         compile: bool,
-    ) -> PackageMetadata: ...
+        sync_mode: bool,
+        prepared: PreparedPackage | None = None,
+    ) -> PackageMetadata:
+        if prepared is None:
+            prepared = self._prepare_package(espec, refresh=False)
+        self.validate_candidate_name(espec, prepared.name)
+        for target_rel_path in prepared.files:
+            self._canonicalize_package_path(target_rel_path)
+
+        meta = PackageMetadata(
+            name=prepared.name,
+            version=prepared.version,
+            file_hashes={},
+            requirement=espec.extended_spec,
+        )
+        if prepared.summary is not None:
+            meta["summary"] = prepared.summary
+        if prepared.license is not None:
+            meta["license"] = prepared.license
+        if prepared.dependencies is not None:
+            meta["dependencies"] = prepared.dependencies
+        if prepared.project_urls is not None:
+            meta["project_urls"] = prepared.project_urls
+
+        editable_files: dict[str, str] = {}
+        if espec.editable:
+            assert espec.location is not None
+            resolved_location = espec.get_resolved_location()
+            assert resolved_location is not None
+
+            project_path = os.path.abspath(resolved_location)
+            editable_files = self.compute_files_mapping(project_path, list(prepared.files))
+            meta["editable"] = EditableInfo(
+                project_path=self.reanchor_at_lib_dir(espec.location, espec.base_dir),
+                project_fingerprint=self.compute_project_fingerprint(project_path),
+                files=editable_files,
+            )
+
+        installed_files: dict[str, bytes] = {}
+        for target_rel_path, content in prepared.files.items():
+            if target_rel_path in editable_files:
+                continue
+
+            compile_file = compile and (
+                not target_rel_path.endswith(".py")
+                or target_rel_path[:-3] + ".mpy" not in prepared.files
+            )
+            installed_rel_path, installed_content = self._compile_package_file_if_required(
+                content, target_rel_path, compile_file, compiler
+            )
+            installed_files[installed_rel_path] = installed_content
+
+        for installed_rel_path, installed_content in installed_files.items():
+            target_path = self._resolve_package_target_path(installed_rel_path)
+            self._tmgr.ensure_dir_and_write_file(target_path, installed_content)
+            meta["file_hashes"][installed_rel_path] = (
+                hashlib.sha256(installed_content).hexdigest() if sync_mode else None
+            )
+
+        if espec.location is not None:
+            meta["location"] = self._get_stored_candidate_location(espec.location, espec.base_dir)
+
+        meta_path = self.get_relative_metadata_path(meta["name"])
+        meta["file_hashes"][meta_path] = None
+
+        installed_info = self.get_installed_package_info(meta["name"])
+        if installed_info is not None and not sync_mode:
+            previous_meta = self.load_package_metadata(installed_info)
+            for previous_file in previous_meta["file_hashes"]:
+                if previous_file not in meta["file_hashes"]:
+                    previous_path = self._tmgr.join_path(self.get_target_dir(), previous_file)
+                    self._tmgr.remove_file_if_exists(previous_path)
+
+        self.save_package_metadata(meta_path, meta)
+        return meta
+
+    @abstractmethod
+    def _prepare_package(self, espec: ExtendedSpec, refresh: bool) -> PreparedPackage: ...
+
+    def _get_prepared_package_candidate(
+        self, espec: ExtendedSpec, prepared: PreparedPackage
+    ) -> PackageCandidate:
+        location = self._resolve_spec_location(espec) if espec.location is not None else None
+        return PackageCandidate(
+            canonical_name=self.canonicalize_package_name(prepared.name),
+            version=prepared.version,
+            location=location,
+            editable=espec.editable,
+        )
 
     def get_compatible_installed_package(
         self,
         espec: ExtendedSpec,
+        sync_mode: bool = False,
     ) -> PackageMetadata | None:
         for installed_info in self.get_installed_package_infos().values():
             meta = self.load_package_metadata(installed_info)
             candidate = self.get_package_candidate(meta)
             if not self.is_package_candidate_compatible(espec, candidate):
                 continue
-            if not self._installed_package_files_exist(meta):
+            if not self._installed_package_files_match(meta, sync_mode):
                 continue
             return meta
 
@@ -521,13 +579,13 @@ class Installer(ABC):
                 f"not {espec.name!r}"
             )
 
-    def are_common_candidate_properties_compatible(
+    def is_package_candidate_compatible(
         self, espec: ExtendedSpec, candidate: PackageCandidate
     ) -> bool:
         if espec.is_local_dir_spec() or espec.editable:
             return False
 
-        return self.are_common_candidate_properties_satisfied(espec, candidate)
+        return self.does_package_candidate_satisfy(espec, candidate)
 
     def are_common_candidate_properties_satisfied(
         self, espec: ExtendedSpec, candidate: PackageCandidate
@@ -551,8 +609,14 @@ class Installer(ABC):
     def does_package_candidate_satisfy(
         self, espec: ExtendedSpec, candidate: PackageCandidate
     ) -> bool:
-        """Return whether candidate satisfies espec, independently of reuse policy."""
-        return self.is_package_candidate_compatible(espec, candidate)
+        return self.are_common_candidate_properties_satisfied(
+            espec, candidate
+        ) and self.does_package_candidate_version_satisfy(espec, candidate)
+
+    @abstractmethod
+    def does_package_candidate_version_satisfy(
+        self, espec: ExtendedSpec, candidate: PackageCandidate
+    ) -> bool: ...
 
     def _get_stored_candidate_location(self, location: str, base_dir: str | None = None) -> str:
         if looks_like_local_dir(location):
@@ -573,18 +637,23 @@ class Installer(ABC):
             return os.path.abspath(location)
         return location
 
-    def _installed_package_files_exist(self, meta: PackageMetadata) -> bool:
-        for file_rel_path in meta["files"]:
+    def _installed_package_files_match(
+        self,
+        meta: PackageMetadata,
+        sync_mode: bool,
+    ) -> bool:
+        for file_rel_path, expected_hash in meta["file_hashes"].items():
             full_path = self._tmgr.join_path(self.get_target_dir(), file_rel_path)
             if not self._tmgr.is_file(full_path):
                 return False
+            if (
+                sync_mode
+                and expected_hash is not None
+                and hashlib.sha256(self._tmgr.read_file(full_path)).hexdigest() != expected_hash
+            ):
+                return False
 
         return True
-
-    @abstractmethod
-    def is_package_candidate_compatible(
-        self, espec: ExtendedSpec, candidate: PackageCandidate
-    ) -> bool: ...
 
     def uninstall(
         self,
@@ -630,7 +699,7 @@ class Installer(ABC):
         dirs_to_check = []
 
         package_meta = self.load_package_metadata(installation_info)
-        for file_rel_path in package_meta["files"]:
+        for file_rel_path in package_meta["file_hashes"]:
             full_path = self._tmgr.join_path(self.get_target_dir(), file_rel_path)
             print("Uninstalling:", full_path)
             if self._tmgr.remove_file_if_exists(full_path):
@@ -644,7 +713,7 @@ class Installer(ABC):
             if dir_to_check != self.get_target_dir() and not self._tmgr.listdir(dir_to_check):
                 print("Removing empty directory:", dir_to_check)
                 self._tmgr.rmdir(dir_to_check)
-                parent_dir = dir_to_check.rsplit("/", maxsplit=1)[0]
+                parent_dir = dir_to_check.rsplit(self._tmgr.get_dir_sep(), maxsplit=1)[0]
                 if parent_dir not in dirs_to_check and parent_dir != self.get_target_dir():
                     dirs_to_check.append(parent_dir)
 
@@ -689,11 +758,34 @@ class Installer(ABC):
         abs_local_lib_dir = self._tmgr.base_path
         return os.path.relpath(abs_project_path, abs_local_lib_dir)
 
+    @staticmethod
+    def _canonicalize_package_path(file_rel_path: str) -> str:
+        if not isinstance(file_rel_path, str):
+            canonical_path = file_rel_path
+        else:
+            canonical_path = posixpath.normpath(file_rel_path.replace(os.path.sep, "/"))
+        try:
+            validate_package_path(canonical_path)
+        except (TypeError, ValueError) as e:
+            raise UserError(str(e)) from e
+        return canonical_path
+
+    def _resolve_package_target_path(self, file_rel_path: str) -> str:
+        file_rel_path = self._canonicalize_package_path(file_rel_path)
+        target_dir = self.get_target_dir()
+        target_path = self._tmgr.join_path(target_dir, file_rel_path)
+
+        if not isinstance(self._tmgr, DirTargetManager):
+            return target_path
+
+        resolved_target_dir = Path(target_dir).resolve()
+        resolved_target_path = Path(target_path).resolve()
+        if not resolved_target_path.is_relative_to(resolved_target_dir):
+            raise UserError(f"Package path escapes the target directory: {file_rel_path!r}")
+        return str(resolved_target_path)
+
     def save_package_metadata(self, rel_meta_path: str, meta: PackageMetadata) -> None:
-        full_path = self._tmgr.join_path(
-            self.get_target_dir(),
-            rel_meta_path,
-        )
+        full_path = self._resolve_package_target_path(rel_meta_path)
         content = self.compile_package_metadata(meta)
         self._tmgr.ensure_dir_and_write_file(full_path, content)
 
@@ -731,23 +823,28 @@ class Installer(ABC):
         canonical_name = self.canonicalize_package_name(name)
         return self.get_installed_package_infos().get(canonical_name)
 
-    @abstractmethod
-    def get_package_latest_version(self, name: str) -> str | None: ...
+    def get_package_latest_version(self, name: str) -> str | None:
+        return None
 
     def parse_meta_file_path(self, meta_file_path: str) -> PackageInstallationInfo | None:
         logger.debug(f"Parsing meta file path {meta_file_path}")
         _, meta_file_name = self._tmgr.split_dir_and_basename(meta_file_path)
         assert meta_file_name is not None
         assert meta_file_name.endswith(META_FILE_SUFFIX)
-        parts = meta_file_name[: -len(META_FILE_SUFFIX)].split("-")
-        if len(parts) != 2:
-            logger.warning(f"Unexpected metadata file name: {meta_file_name}")
-            return None
+
+        raw = self._tmgr.read_file(self._tmgr.join_path(self.get_target_dir(), meta_file_path))
+        meta: PackageMetadata = json.loads(raw)
+        expected_path = self.get_relative_metadata_path(meta["name"])
+        if meta_file_path != expected_path:
+            raise UserError(
+                f"Package metadata path {meta_file_path!r} does not match package name "
+                f"{meta['name']!r}; expected path {expected_path!r}"
+            )
 
         return PackageInstallationInfo(
             rel_meta_file_path=meta_file_path,
-            name=self.deslug_package_name(parts[0]),
-            version=self.deslug_package_version(parts[1]),
+            name=meta["name"],
+            version=meta["version"],
         )
 
     def load_package_metadata(self, info: PackageInstallationInfo) -> PackageMetadata:
@@ -756,26 +853,13 @@ class Installer(ABC):
         )
         return json.loads(raw)
 
-    def get_relative_metadata_path(self, name: str, version: str) -> str:
-        file_name = (
-            f"{self.slug_package_name(name)}-{self.slug_package_version(version)}{META_FILE_SUFFIX}"
-        )
+    def get_relative_metadata_path(self, name: str) -> str:
+        canonical_name = self.canonicalize_package_name(name)
+        file_name = f"{urllib.parse.quote(canonical_name, safe='')}{META_FILE_SUFFIX}"
         return self._tmgr.join_path(f".{self.get_installer_name()}", file_name)
 
     @abstractmethod
     def canonicalize_package_name(self, name: str) -> str: ...
-
-    @abstractmethod
-    def slug_package_name(self, name: str) -> str: ...
-
-    @abstractmethod
-    def slug_package_version(self, version: str) -> str: ...
-
-    @abstractmethod
-    def deslug_package_name(self, name: str) -> str: ...
-
-    @abstractmethod
-    def deslug_package_version(self, version: str) -> str: ...
 
     def parse_extended_spec(self, extended_spec: str, base_dir: str | None = None) -> ExtendedSpec:
         parts = extended_spec.split(maxsplit=1)
@@ -935,7 +1019,7 @@ class Installer(ABC):
         source_package_meta: PackageMetadata,
     ) -> PackageDeployRecipe:
         target_metadata = source_package_meta.copy()
-        target_metadata["files"] = []
+        target_metadata["file_hashes"] = {}
         target_metadata.pop("location", None)
 
         upload_map: dict[str, str] = {}  # rel destination => rel source (from source_dir)
@@ -956,7 +1040,7 @@ class Installer(ABC):
 
                 upload_map[rel_target] = local_installation_source_path
 
-        for local_installation_source_path in source_package_meta["files"]:
+        for local_installation_source_path in source_package_meta["file_hashes"]:
             if local_installation_source_path != source_package_info.rel_meta_file_path:
                 upload_map[local_installation_source_path] = local_installation_source_path
 

@@ -32,6 +32,7 @@ ACCEPTED_BUILD_ONLY_LIBS = [
 ACCEPTED_BUNDLE_ONLY_REQUIREMENTS = ["displayio_dial/pyproject.toml.disabled"]
 
 
+@pytest.mark.slow
 def test_single_build():
     cache_dir = tempfile.mkdtemp()
     build_dir = tempfile.mkdtemp()

@@ -25,7 +25,7 @@ def test_pip_resolved_installation_specs(tmp_path):
 
     assert (
         installer.get_resolved_installation_spec(
-            PackageMetadata(name="Friendly_Bard", version="1.2.0", files=[])
+            PackageMetadata(name="Friendly_Bard", version="1.2.0", file_hashes={})
         )
         == "Friendly_Bard==1.2.0"
     )
@@ -35,7 +35,7 @@ def test_pip_resolved_installation_specs(tmp_path):
                 name="friendly-bard",
                 version="1.2.0",
                 location="https://example.com/friendly-bard.whl",
-                files=[],
+                file_hashes={},
             )
         )
         == "friendly-bard @ https://example.com/friendly-bard.whl"
@@ -51,7 +51,7 @@ def test_pip_resolved_installation_specs(tmp_path):
                     "project_fingerprint": "abc",
                     "files": {},
                 },
-                files=[],
+                file_hashes={},
             )
         )
         == "-e ../../../friendly-bard"
@@ -67,7 +67,7 @@ def test_pip_resolved_installation_specs(tmp_path):
                     "project_fingerprint": "abc",
                     "files": {},
                 },
-                files=[],
+                file_hashes={},
             ),
             str(project_dir),
         )
@@ -88,13 +88,16 @@ def test_local_pip_package_install(tmp_path):
 
     assert (lib_dir / "dummy.py").read_text(encoding="utf-8") == 'print("kala")\n'
 
-    meta_path = lib_dir / ".pip" / "simple_app_project-1.0.0.meta"
+    meta_path = lib_dir / ".pip" / "simple-app-project.meta"
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     assert meta["name"] == "simple-app-project"
     assert meta["version"] == "1.0.0"
     assert meta["requirement"] == str(project_path)
     assert meta["location"] == str(project_path)
-    assert meta["files"] == ["dummy.py", ".pip/simple_app_project-1.0.0.meta"]
+    assert meta["file_hashes"] == {
+        "dummy.py": None,
+        ".pip/simple-app-project.meta": None,
+    }
 
 
 def test_uv_pip_uses_requirement_base_dir_as_subprocess_cwd(tmp_path, monkeypatch):
@@ -126,6 +129,37 @@ def test_uv_pip_uses_requirement_base_dir_as_subprocess_cwd(tmp_path, monkeypatc
     ]
 
 
+def test_pip_reinstall_refreshes_uv_cache(tmp_path, monkeypatch):
+    cache_dir = tmp_path / "cache"
+    lib_dir = tmp_path / "lib"
+    cache_dir.mkdir()
+    lib_dir.mkdir()
+    installer = create_pip_installer(cache_dir, lib_dir)
+    calls = []
+
+    def invoke_pip(args, cwd=None):
+        calls.append(args)
+        target_dir = Path(args[args.index("--target") + 1])
+        dist_info_dir = target_dir / "foo-1.0.0.dist-info"
+        dist_info_dir.mkdir()
+        (target_dir / "foo.py").write_text("VALUE = 1\n", encoding="utf-8")
+        (dist_info_dir / "METADATA").write_text(
+            "Name: foo\nVersion: 1.0.0\n",
+            encoding="utf-8",
+        )
+        (dist_info_dir / "RECORD").write_text(
+            "foo.py,,\nfoo-1.0.0.dist-info/METADATA,,\nfoo-1.0.0.dist-info/RECORD,,\n",
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(installer, "_invoke_pip", invoke_pip)
+
+    installer.install(["foo"], compile=False, reinstall=True)
+
+    assert len(calls) == 1
+    assert "--refresh" in calls[0]
+
+
 def test_parsed_relative_location_resolves_against_explicit_base_dir(tmp_path):
     cache_dir = tmp_path / "cache"
     lib_dir = tmp_path / "lib"
@@ -141,17 +175,25 @@ def test_parsed_relative_location_resolves_against_explicit_base_dir(tmp_path):
     assert espec.get_resolved_location() == str(tmp_path / "package")
 
 
-def test_installed_metadata_rejects_duplicate_canonical_names(tmp_path):
+def test_installed_metadata_rejects_path_not_matching_canonical_name(tmp_path):
     cache_dir = tmp_path / "cache"
     lib_dir = tmp_path / "lib"
     meta_dir = lib_dir / ".pip"
     cache_dir.mkdir()
     meta_dir.mkdir(parents=True)
-    (meta_dir / "Friendly_Bard-1.0.meta").write_text("{}", encoding="utf-8")
-    (meta_dir / "friendly_bard-2.0.meta").write_text("{}", encoding="utf-8")
+    (meta_dir / "Friendly_Bard.meta").write_text(
+        json.dumps({"name": "Friendly.Bard", "version": "1.0", "file_hashes": {}}),
+        encoding="utf-8",
+    )
     installer = create_pip_installer(cache_dir, lib_dir)
 
-    with pytest.raises(UserError, match="Conflicting metadata files for package 'friendly-bard'"):
+    with pytest.raises(
+        UserError,
+        match=(
+            r"Package metadata path '.pip/Friendly_Bard.meta' does not match package name "
+            r"'Friendly.Bard'; expected path '.pip/friendly-bard.meta'"
+        ),
+    ):
         installer.get_installed_package_infos()
 
 
@@ -164,14 +206,14 @@ def test_editable_local_pip_package_install_records_source_mapping(tmp_path):
     project_path = (Path(__file__).parent / "data" / "projects" / "simple-app-project").resolve()
     installer = create_pip_installer(cache_dir, lib_dir)
 
-    installer.install([f"-e {project_path}"], compile=False)
+    installer.install([f"-e {project_path}"], compile=True)
 
     assert not (lib_dir / "dummy.py").exists()
 
-    meta_path = lib_dir / ".pip" / "simple_app_project-1.0.0.meta"
+    meta_path = lib_dir / ".pip" / "simple-app-project.meta"
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     assert meta["requirement"] == f"-e {project_path}"
-    assert meta["files"] == [".pip/simple_app_project-1.0.0.meta"]
+    assert meta["file_hashes"] == {".pip/simple-app-project.meta": None}
     assert meta["editable"]["project_path"] == str(project_path)
     assert meta["editable"]["files"] == {"dummy.py": "dummy.py"}
 
@@ -247,7 +289,7 @@ def test_pip_dependency_markers_use_parent_extras(tmp_path):
     meta = PackageMetadata(
         name="parent",
         version="1.0",
-        files=[],
+        file_hashes={},
         dependencies=[
             'base-dep; python_version >= "0"',
             'future-dep; python_version < "0"',

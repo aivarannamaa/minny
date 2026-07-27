@@ -4,6 +4,8 @@ from typing import Any
 
 from minny import __version__
 
+TARGET_SELECTION_OPTIONS = ("-p", "--port", "-m", "--mount", "-d", "--dir")
+
 
 def _process_remainder_args(args: Any, reminder: list[str]) -> list[str]:
     # returns list of bad args
@@ -21,6 +23,19 @@ def _process_remainder_args(args: Any, reminder: list[str]) -> list[str]:
     args.extended_specs.extend(reminder)
 
     return []
+
+
+def _find_target_selection_option(raw_args: list[str]) -> str | None:
+    for arg in raw_args:
+        for option in TARGET_SELECTION_OPTIONS:
+            if arg == option or arg.startswith(f"{option}="):
+                return option
+
+        for option in ("-p", "-m", "-d"):
+            if not arg.startswith("--") and arg.startswith(option) and len(arg) > len(option):
+                return option
+
+    return None
 
 
 def _add_connection_args(parser: argparse.ArgumentParser) -> None:
@@ -90,6 +105,16 @@ def _add_installer_commands(
     install_parser.add_argument(
         "--compile",
         help="Compile and install mpy files.",
+        action="store_true",
+    )
+    install_parser.add_argument(
+        "--reinstall",
+        help="Resolve requirements afresh and reinstall selected packages.",
+        action="store_true",
+    )
+    install_parser.add_argument(
+        "--upgrade",
+        help="Upgrade packages to the newest candidates allowed by their requirements.",
         action="store_true",
     )
 
@@ -171,7 +196,16 @@ def parse_arguments(raw_args: list[str] | None = None) -> Any:
     cache_parser = top_subparsers.add_parser("cache", help="Inspect and manage minny cache.")
 
     sync_parser = top_subparsers.add_parser("sync", help="Update project's local environment")
-    _add_connection_args(sync_parser)
+    sync_parser.add_argument(
+        "--reinstall",
+        help="Reinstall all packages, preserving selections recorded in the lock.",
+        action="store_true",
+    )
+    sync_parser.add_argument(
+        "--upgrade",
+        help="Upgrade packages beyond the selections recorded in the lock.",
+        action="store_true",
+    )
 
     deploy_parser = top_subparsers.add_parser("deploy", help="Deploy project to device")
     _add_connection_args(deploy_parser)
@@ -205,6 +239,13 @@ def parse_arguments(raw_args: list[str] | None = None) -> Any:
     # argparse doesn't support arbitrary interleaving of options and a nargs="*" positional
     # when subparsers are involved. Parse trailing install specs manually.
     args, remainder = main_parser.parse_known_args(args=raw_args)
+
+    if args.main_command == "sync":
+        target_selection_option = _find_target_selection_option(raw_args)
+        if target_selection_option is not None:
+            main_parser.error(
+                f"argument {target_selection_option}: not allowed with command 'sync'"
+            )
 
     bad_remainder = _process_remainder_args(args, remainder)
     if bad_remainder:

@@ -1,6 +1,8 @@
 import dataclasses
 import json
+import ntpath
 import os.path
+import posixpath
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,7 +28,8 @@ class LockPackage:
     resolved_spec: str
     requirement: str | None
     dependencies: list[str]
-    files: list[str]
+    file_hashes: dict[str, str]
+    generated_files: list[str]
     location: str | None = None
     editable: bool = False
     project_path: str | None = None
@@ -46,6 +49,7 @@ class LockRequirementConflict:
 class LockPathConflict:
     path: str
     packages: list[str]
+    final_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -94,7 +98,8 @@ class SyncLock:
             version=version,
             installers=installers,
             path_conflicts=[
-                LockPathConflict(**raw_conflict) for raw_conflict in data.get("path_conflicts", [])
+                _read_lock_path_conflict(raw_conflict)
+                for raw_conflict in data.get("path_conflicts", [])
             ],
         )
 
@@ -120,9 +125,17 @@ class SyncLock:
 
             for package in section.packages:
                 lines.append(f"[[{installer_name}.packages]]")
-                package_without_editable_files = dataclasses.replace(package, editable_files=[])
-                lines.extend(_format_dataclass_fields(package_without_editable_files))
+                package_without_nested_fields = dataclasses.replace(
+                    package, file_hashes={}, editable_files=[]
+                )
+                lines.extend(_format_dataclass_fields(package_without_nested_fields))
                 lines.append("")
+
+                if package.file_hashes:
+                    lines.append(f"[{installer_name}.packages.file_hashes]")
+                    for path, file_hash in package.file_hashes.items():
+                        lines.append(f"{json.dumps(path)} = {json.dumps(file_hash)}")
+                    lines.append("")
 
                 for editable_file in package.editable_files:
                     lines.append(f"[[{installer_name}.packages.editable_files]]")
@@ -156,29 +169,60 @@ def _read_lock_input(data: dict[str, Any]) -> SyncInput:
 
 
 def _read_lock_package(data: dict[str, Any]) -> LockPackage:
+    file_hashes = data.get("file_hashes", {})
+    generated_files = data.get("generated_files", [])
+    editable_files = [
+        LockEditableFile(source=item["source"], target=item["target"])
+        for item in data.get("editable_files", [])
+    ]
+    for path in file_hashes:
+        validate_package_path(path)
+    for path in generated_files:
+        validate_package_path(path)
+    for editable_file in editable_files:
+        validate_package_path(editable_file.target)
+
     return LockPackage(
         canonical_name=data["canonical_name"],
         version=data["version"],
         resolved_spec=data["resolved_spec"],
         requirement=data.get("requirement"),
         dependencies=data.get("dependencies", []),
-        files=data.get("files", []),
+        file_hashes=file_hashes,
+        generated_files=generated_files,
         location=data.get("location"),
         editable=data.get("editable", False),
         project_path=data.get("project_path"),
         project_fingerprint=data.get("project_fingerprint"),
-        editable_files=[
-            LockEditableFile(source=item["source"], target=item["target"])
-            for item in data.get("editable_files", [])
-        ],
+        editable_files=editable_files,
     )
+
+
+def _read_lock_path_conflict(data: dict[str, Any]) -> LockPathConflict:
+    validate_package_path(data["path"])
+    return LockPathConflict(**data)
+
+
+def validate_package_path(path: str) -> None:
+    if not isinstance(path, str):
+        raise TypeError(f"Package path must be a string, got {type(path).__name__}")
+    if (
+        not path
+        or "\0" in path
+        or "\\" in path
+        or posixpath.isabs(path)
+        or ntpath.splitdrive(path)[0]
+        or any(part in {"", ".", ".."} for part in path.split("/"))
+        or posixpath.normpath(path) != path
+    ):
+        raise ValueError(f"Invalid package path: {path!r}")
 
 
 def _format_dataclass_fields(instance: Any) -> list[str]:
     result = []
     for field_info in dataclasses.fields(instance):
         value = getattr(instance, field_info.name)
-        if value is None or value == [] or value is False:
+        if value is None or value == [] or value == {} or value is False:
             continue
         result.append(f"{field_info.name} = {_format_toml_value(value)}")
 

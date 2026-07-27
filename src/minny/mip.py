@@ -4,12 +4,12 @@ import urllib.parse
 from logging import getLogger
 
 from minny.common import UserError, fetch_git_refs, looks_like_local_dir
-from minny.compiling import Compiler
 from minny.installer import (
     ExtendedSpec,
     Installer,
     PackageCandidate,
     PackageMetadata,
+    PreparedPackage,
 )
 from minny.util import download_and_parse_json, download_bytes, parse_json_file
 
@@ -40,111 +40,66 @@ class MipInstaller(Installer):
             assert isinstance(url_dest, str)
             assert isinstance(url_source, str)
             target = self._normalize_target_path(url_dest, url_source)
+            normalized_source = posixpath.normpath(url_source.replace("\\", "/"))
             if (
-                target.startswith("..")
-                or target.startswith("/")
-                or url_source.startswith("..")
-                or url_source.startswith("/")
+                target.startswith(("..", "/"))
+                or normalized_source == ".."
+                or normalized_source.startswith(("../", "/"))
                 or ":" in url_source
             ):
                 logger.warning(f"Not registering {(url_dest, url_source)} as editable")
             elif target not in target_files:
                 logger.warning(f"{target} present in package.json but not required")
             else:
-                result[target] = url_source
+                result[target] = normalized_source
 
         return result
 
     def canonicalize_package_name(self, name: str) -> str:
         return name
 
-    def slug_package_name(self, name: str) -> str:
-        return urllib.parse.quote(name, safe="").replace("-", "%2D")
-
-    def slug_package_version(self, version: str) -> str:
-        assert "_" not in version
-        return version.replace("-", "_")
-
-    def deslug_package_name(self, name: str) -> str:
-        return urllib.parse.unquote(name)
-
-    def deslug_package_version(self, version: str) -> str:
-        return version.replace("_", "-")
-
     def get_installer_name(self) -> str:
         return "mip"
 
-    def _install_package_without_dependencies(
-        self,
-        espec: ExtendedSpec,
-        compiler: Compiler,
-        compile: bool = True,
-    ) -> PackageMetadata:
+    def _prepare_package(self, espec: ExtendedSpec, refresh: bool) -> PreparedPackage:
         package_json, package_base, direct_file, resolved_version = self._load_package_data(espec)
 
         if direct_file is not None:
-            name, version, files = self._install_direct_file(
+            return self._prepare_direct_file(
                 espec,
                 direct_file,
                 resolved_version,
-                compile=compile,
-                compiler=compiler,
             )
-            meta = PackageMetadata(
-                name=name,
-                version=version,
-                files=files,
-                requirement=espec.extended_spec,
-            )
-            return self.finalize_package_install(meta, espec)
 
         assert package_json is not None
         assert package_base is not None
 
-        name = self._get_package_name(espec, package_json, package_base)
-        self.validate_candidate_name(espec, name)
+        name = self._get_package_name(espec, package_json)
         version = str(
             resolved_version
             or package_json.get("version")
             or self._get_requested_version(espec)
             or UNVERSIONED_VERSION
         )
-        meta = PackageMetadata(
+        prepared = PreparedPackage(
             name=name,
             version=version,
-            files=[],
-            requirement=espec.extended_spec,
+            files={},
         )
 
         deps = package_json.get("deps", [])
         if deps:
-            meta["dependencies"] = deps
+            prepared.dependencies = deps
 
         for rel_target_path, source_ref in self._iter_package_urls(package_json):
             source = self._resolve_source(package_base, source_ref)
+            prepared.files[rel_target_path] = self._read_resolved_source(source)
 
-            final_rel_path = self._upload_resolved_source(
-                source=source,
-                target_rel_path=rel_target_path,
-                compile=compile,
-                compiler=compiler,
-            )
-            meta["files"].append(final_rel_path)
+        return prepared
 
-        return self.finalize_package_install(meta, espec)
-
-    def is_package_candidate_compatible(
+    def does_package_candidate_version_satisfy(
         self, espec: ExtendedSpec, candidate: PackageCandidate
     ) -> bool:
-        if espec.is_local_dir_spec() or espec.editable:
-            return False
-        return self.does_package_candidate_satisfy(espec, candidate)
-
-    def does_package_candidate_satisfy(
-        self, espec: ExtendedSpec, candidate: PackageCandidate
-    ) -> bool:
-        if not self.are_common_candidate_properties_satisfied(espec, candidate):
-            return False
         requested_version = self._get_requested_version(espec)
         if self._is_github_location(espec.plain_spec):
             requested_version = self._resolve_github_revision(espec.plain_spec)
@@ -182,9 +137,6 @@ class MipInstaller(Installer):
         if self._is_github_location(plain_spec):
             name = None
             location, _ = self._split_github_location(plain_spec)
-        elif looks_like_local_dir(plain_spec):
-            name = None
-            location = plain_spec
         elif self._looks_like_location(plain_spec):
             name = None
             location = plain_spec
@@ -269,29 +221,19 @@ class MipInstaller(Installer):
             None,
         )
 
-    def _install_direct_file(
+    def _prepare_direct_file(
         self,
         espec: ExtendedSpec,
         direct_file: tuple[str, bytes],
         resolved_version: str | None,
-        compile: bool,
-        compiler: Compiler,
-    ) -> tuple[str, str, list[str]]:
+    ) -> PreparedPackage:
         file_name, content = direct_file
         if not file_name.endswith((".py", ".mpy")):
             raise UserError(f"Unsupported mip file: {file_name}")
 
         name = espec.name or self._get_source_identity(espec)
         version = resolved_version or self._get_requested_version(espec) or UNVERSIONED_VERSION
-        target_rel_path = file_name
-        uploaded_rel_path = self.upload_package_bytes(
-            content=content,
-            source_file_name=file_name,
-            target_rel_path=target_rel_path,
-            compile=compile,
-            compiler=compiler,
-        )
-        return name, version, [uploaded_rel_path]
+        return PreparedPackage(name=name, version=version, files={file_name: content})
 
     def _iter_package_urls(self, package_json: dict) -> list[tuple[str, str]]:
         urls = package_json.get("urls", [])
@@ -328,30 +270,14 @@ class MipInstaller(Installer):
             return urllib.parse.urljoin(package_base.rstrip("/") + "/", source_ref)
         return os.path.normpath(os.path.join(package_base, source_ref))
 
-    def _upload_resolved_source(
-        self,
-        source: str,
-        target_rel_path: str,
-        compile: bool,
-        compiler: Compiler,
-    ) -> str:
+    def _read_resolved_source(self, source: str) -> bytes:
         if self._is_url(source):
-            return self.upload_package_bytes(
-                content=download_bytes(source),
-                source_file_name=posixpath.basename(urllib.parse.urlsplit(source).path),
-                target_rel_path=target_rel_path,
-                compile=compile,
-                compiler=compiler,
-            )
+            return download_bytes(source)
 
-        return self.upload_package_file(
-            source,
-            target_rel_path,
-            compile,
-            compiler,
-        )
+        with open(source, "rb") as fp:
+            return fp.read()
 
-    def _get_package_name(self, espec: ExtendedSpec, package_json: dict, package_base: str) -> str:
+    def _get_package_name(self, espec: ExtendedSpec, package_json: dict) -> str:
         if espec.name is not None:
             return espec.name
         if isinstance(package_json.get("name"), str):

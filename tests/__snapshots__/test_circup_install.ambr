@@ -2,7 +2,7 @@
 # name: test_no_deps_install
   dict({
     '.circup': -1,
-    '.circup/adafruit_character_lcd-3.5.3.meta': 466,
+    '.circup/adafruit_character_lcd.meta': 502,
     '.minny': -1,
     '.minny/cookie': 36,
     'adafruit_character_lcd': -1,
@@ -16,10 +16,10 @@
 # name: test_with_deps_install
   dict({
     '.circup': -1,
-    '.circup/adafruit_74hc595-1.5.2.meta': 199,
-    '.circup/adafruit_bus_device-5.2.17.meta': 273,
-    '.circup/adafruit_character_lcd-3.5.3.meta': 466,
-    '.circup/adafruit_mcp230xx-2.6.2.meta': 512,
+    '.circup/adafruit_74hc595.meta': 211,
+    '.circup/adafruit_bus_device.meta': 296,
+    '.circup/adafruit_character_lcd.meta': 502,
+    '.circup/adafruit_mcp230xx.meta': 578,
     '.minny': -1,
     '.minny/cookie': 36,
     'adafruit_74hc595.py': 6642,

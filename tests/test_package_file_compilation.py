@@ -1,7 +1,11 @@
 from typing import cast
 
+import pytest
+
+from minny.common import UserError
 from minny.compiling import Compiler
 from minny.dir_target import DirTargetManager
+from minny.installer import ExtendedSpec, PreparedPackage
 from minny.pip import PipInstaller
 from minny.project import ProjectManager
 
@@ -14,43 +18,133 @@ class _FailingCompiler:
         raise AssertionError("Module format requested for a non-Python file")
 
 
-def test_package_file_upload_does_not_compile_data(tmp_path):
+class _PreparedPackageInstaller(PipInstaller):
+    def __init__(self, *args, prepared: PreparedPackage, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._prepared = prepared
+
+    def _prepare_package(self, espec: ExtendedSpec, refresh: bool) -> PreparedPackage:
+        return self._prepared
+
+
+@pytest.mark.parametrize("target_path", ["../outside.py", r"foo\..\..\outside.py"])
+def test_prepared_package_install_rejects_unsafe_target_before_writing(tmp_path, target_path):
     target_dir = tmp_path / "target"
     target_dir.mkdir()
-    source_path = tmp_path / "settings.json"
+    installer = _PreparedPackageInstaller(
+        DirTargetManager(str(target_dir), str(tmp_path / "cache"), persistent_tracking=False),
+        target_dir=None,
+        minny_cache_dir=str(tmp_path / "cache"),
+        prepared=PreparedPackage(
+            name="test-package",
+            version="1.0.0",
+            files={target_path: b"malicious content"},
+        ),
+    )
+
+    with pytest.raises(UserError, match="Invalid package path"):
+        installer._install_parsed_specs(
+            [installer.parse_extended_spec("test-package")],
+            no_deps=True,
+            compile=False,
+            mpy_cross=None,
+        )
+
+    assert not (tmp_path / "outside.py").exists()
+
+
+def test_prepared_package_install_rejects_symlink_escape_before_writing(tmp_path):
+    target_dir = tmp_path / "target"
+    outside_dir = tmp_path / "outside"
+    target_dir.mkdir()
+    outside_dir.mkdir()
+    try:
+        (target_dir / "linked").symlink_to(outside_dir, target_is_directory=True)
+    except OSError as e:
+        pytest.skip(f"Could not create test symlink: {e}")
+
+    installer = _PreparedPackageInstaller(
+        DirTargetManager(str(target_dir), str(tmp_path / "cache"), persistent_tracking=False),
+        target_dir=None,
+        minny_cache_dir=str(tmp_path / "cache"),
+        prepared=PreparedPackage(
+            name="test-package",
+            version="1.0.0",
+            files={"linked/outside.py": b"malicious content"},
+        ),
+    )
+
+    with pytest.raises(UserError, match="escapes the target directory"):
+        installer._install_parsed_specs(
+            [installer.parse_extended_spec("test-package")],
+            no_deps=True,
+            compile=False,
+            mpy_cross=None,
+        )
+
+    assert not (outside_dir / "outside.py").exists()
+
+
+def test_prepared_package_install_does_not_compile_data(tmp_path):
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
     content = b'{"answer": 42}\n'
-    source_path.write_bytes(content)
     tmgr = DirTargetManager(str(target_dir), str(tmp_path / "cache"), persistent_tracking=False)
-    installer = PipInstaller(tmgr, target_dir=None, minny_cache_dir=str(tmp_path / "cache"))
-
-    uploaded_path = installer.upload_package_file(
-        str(source_path),
-        "package/settings.json",
-        compile=True,
-        compiler=cast(Compiler, _FailingCompiler()),
+    installer = _PreparedPackageInstaller(
+        tmgr,
+        target_dir=None,
+        minny_cache_dir=str(tmp_path / "cache"),
+        prepared=PreparedPackage(
+            name="test-package",
+            version="1.0.0",
+            files={"package/settings.json": content},
+        ),
     )
 
-    assert uploaded_path == "package/settings.json"
-    assert (target_dir / uploaded_path).read_bytes() == content
+    traversal = installer._install_parsed_specs(
+        [installer.parse_extended_spec("test-package")],
+        no_deps=True,
+        compile=True,
+        mpy_cross=None,
+    )
+
+    meta = traversal.package_metas["test-package"]
+    assert meta["file_hashes"]["package/settings.json"] is None
+    assert (target_dir / "package/settings.json").read_bytes() == content
 
 
-def test_package_byte_upload_does_not_recompile_mpy(tmp_path):
+def test_explicit_mpy_prevents_compiling_matching_py(tmp_path):
     target_dir = tmp_path / "target"
     target_dir.mkdir()
-    content = b"existing mpy content"
+    py_content = b"VALUE = 1\n"
+    mpy_content = b"existing mpy content"
     tmgr = DirTargetManager(str(target_dir), str(tmp_path / "cache"), persistent_tracking=False)
-    installer = PipInstaller(tmgr, target_dir=None, minny_cache_dir=str(tmp_path / "cache"))
-
-    uploaded_path = installer.upload_package_bytes(
-        content,
-        source_file_name="module.mpy",
-        target_rel_path="package/module.mpy",
-        compile=True,
-        compiler=cast(Compiler, _FailingCompiler()),
+    installer = _PreparedPackageInstaller(
+        tmgr,
+        target_dir=None,
+        minny_cache_dir=str(tmp_path / "cache"),
+        prepared=PreparedPackage(
+            name="test-package",
+            version="1.0.0",
+            files={
+                "package/module.py": py_content,
+                "package/module.mpy": mpy_content,
+            },
+        ),
     )
 
-    assert uploaded_path == "package/module.mpy"
-    assert (target_dir / uploaded_path).read_bytes() == content
+    traversal = installer._install_parsed_specs(
+        [installer.parse_extended_spec("test-package")],
+        no_deps=True,
+        compile=True,
+        mpy_cross=None,
+    )
+
+    meta = traversal.package_metas["test-package"]
+    assert meta["file_hashes"]["package/module.py"] is None
+    assert meta["file_hashes"]["package/module.mpy"] is None
+    assert (target_dir / "package/module.py").read_bytes() == py_content
+    assert (target_dir / "package/module.mpy").read_bytes() == mpy_content
 
 
 def test_package_deploy_does_not_compile_or_mark_data_as_module(tmp_path):

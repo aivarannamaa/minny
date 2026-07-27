@@ -34,6 +34,11 @@ Issues = "https://github.com/aivarannamaa/minny/issues"
 Documentation = "https://github.com/aivarannamaa/minny/blob/main/README.md"
 Changelog = "https://github.com/aivarannamaa/minny/blob/main/CHANGELOG.md"
 
+[tool.uv]
+preview-features = ["malware-check"]
+
+[tool.uv.audit]
+malware-check = true
 
 [tool.ruff]
 line-length = 100
@@ -46,6 +51,7 @@ ignore = [
     "SIM103",
     "BLE001",
     "FURB171",
+    "UP012",
     "UP031", # TODO
 ]
 
@@ -62,7 +68,7 @@ search-path = ["src", "tests"]
 dev = [
     "pytest>=8.4.1",
     "syrupy",
-    "ruff>=0.12.9",
+    "ruff>=0.16.0",
     "ty>=0.0.1a19",
     "pyrefly>=0.29.0",
     "types-pyserial",

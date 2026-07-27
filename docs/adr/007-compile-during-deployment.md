@@ -13,3 +13,9 @@ The local synced package area remains source-oriented and target-independent. Wh
 ### Consequences
 
 One synced environment can be inspected locally and deployed to different compatible targets. Target-specific compilation work belongs to deployment and its tracking state.
+
+### Alternatives considered
+
+#### Compile during sync
+
+This could make deployment a simple copy, but `.mpy` output is tied to a runtime format which may not be known during sync. It would make the local environment less useful for inspection and could require separate synced libraries for different targets. Compiling during deployment keeps target-independent source as the reusable baseline.

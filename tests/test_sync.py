@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import os
@@ -7,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import minny.mip
 from minny.common import UserError
 from minny.dir_target import DummyTargetManager
 from minny.installer import (
@@ -17,11 +19,14 @@ from minny.installer import (
     PackageCandidate,
     PackageInstallationInfo,
     PackageMetadata,
+    PreparedPackage,
     RequirementEdge,
 )
 from minny.lockfile import read_sync_lock
+from minny.mip import MipInstaller
 from minny.pip import PipInstaller
 from minny.project import ProjectManager
+from minny.sync_state import read_sync_state
 
 # Test constants
 DUMMY_FILES = [
@@ -53,6 +58,10 @@ def create_local_mip_package(base_dir: Path, name: str) -> Path:
         encoding="utf-8",
     )
     return package_dir
+
+
+def invalidate_sync_state(project_dir: Path) -> None:
+    (project_dir / ".minny" / "sync-state.json").unlink()
 
 
 class FakeProjectInstaller:
@@ -94,6 +103,9 @@ class FakeProjectInstaller:
         separator = "@" if self.installer_name == "mip" else "=="
         return f"{meta['name']}{separator}{meta['version']}"
 
+    def get_relative_metadata_path(self, name: str) -> str:
+        return f".{self.installer_name}/{name}.meta"
+
     def get_installed_package_infos(self) -> dict[str, PackageInstallationInfo]:
         meta_dir = self.lib_dir / f".{self.installer_name}"
         if not meta_dir.is_dir():
@@ -123,6 +135,8 @@ class FakeProjectInstaller:
         extended_specs: list[str],
         project_path: str,
         no_deps: bool = False,
+        reinstall: bool = False,
+        upgrade: bool = False,
     ) -> InstallTraversal:
         self.calls.append(self.installer_name)
         self.lib_dir.mkdir(parents=True, exist_ok=True)
@@ -137,7 +151,7 @@ class FakeProjectInstaller:
                 version = "1.0.0"
 
             module_path = f"{self.installer_name}_{name.replace('-', '_')}.py"
-            meta_path = f".{self.installer_name}/{name}-{version}.meta"
+            meta_path = f".{self.installer_name}/{name}.meta"
             (self.lib_dir / module_path).write_text(
                 f"INSTALLER = {self.installer_name!r}\n",
                 encoding="utf-8",
@@ -148,7 +162,12 @@ class FakeProjectInstaller:
                 version=version,
                 requirement=spec,
                 dependencies=[],
-                files=[module_path, meta_path],
+                file_hashes={
+                    module_path: hashlib.sha256(
+                        f"INSTALLER = {self.installer_name!r}\n".encode()
+                    ).hexdigest(),
+                    meta_path: None,
+                },
             )
             (self.lib_dir / meta_path).write_text(json.dumps(meta), encoding="utf-8")
             traversal.register_package(name, meta, DEPENDENCY_GRAPH_ROOT)
@@ -165,26 +184,12 @@ class VersionedInstaller(Installer):
     def canonicalize_package_name(self, name: str) -> str:
         return name
 
-    def slug_package_name(self, name: str) -> str:
-        return name
-
-    def slug_package_version(self, version: str) -> str:
-        return version.replace(".", "_")
-
-    def deslug_package_name(self, name: str) -> str:
-        return name
-
-    def deslug_package_version(self, version: str) -> str:
-        return version.replace("_", ".")
-
     def get_package_latest_version(self, name: str) -> str | None:
         return self.latest_version
 
-    def is_package_candidate_compatible(
+    def does_package_candidate_version_satisfy(
         self, espec: ExtendedSpec, candidate: PackageCandidate
     ) -> bool:
-        if not self.are_common_candidate_properties_compatible(espec, candidate):
-            return False
         if espec.plain_spec == "foo<2.0.0":
             return candidate.version < "2.0.0"
         return True
@@ -204,7 +209,7 @@ class VersionedInstaller(Installer):
     ) -> str:
         return f"{meta['name']}@{meta['version']}"
 
-    def _install_package_without_dependencies(self, espec, compiler, compile=True):
+    def _prepare_package(self, espec, refresh):
         name = "foo"
         if "@" in espec.plain_spec:
             _, version = espec.plain_spec.rsplit("@", maxsplit=1)
@@ -214,22 +219,17 @@ class VersionedInstaller(Installer):
             version = self.latest_version
 
         rel_path = f"{name}_{version.replace('.', '_')}.py"
-        self._tmgr.ensure_dir_and_write_file(
-            self._tmgr.join_path(self.get_target_dir(), rel_path),
-            f"NAME = {name!r}\nVERSION = {version!r}\n".encode("utf-8"),
-        )
-        meta = PackageMetadata(
+        content = f"NAME = {name!r}\nVERSION = {version!r}\n".encode("utf-8")
+        return PreparedPackage(
             name=name,
             version=version,
-            requirement=espec.extended_spec,
             dependencies=[],
-            files=[rel_path],
+            files={rel_path: content},
         )
-        return self.finalize_package_install(meta, espec)
 
 
 class DependencyVersionedInstaller(VersionedInstaller):
-    def _install_package_without_dependencies(self, espec, compiler, compile=True):
+    def _prepare_package(self, espec, refresh):
         if espec.plain_spec in {"root", "root@1.0.0"}:
             name = "root"
             version = "1.0.0"
@@ -246,37 +246,78 @@ class DependencyVersionedInstaller(VersionedInstaller):
             raise AssertionError(f"Unexpected spec: {espec.plain_spec}")
 
         rel_path = f"{name}_{version.replace('.', '_')}.py"
-        self._tmgr.ensure_dir_and_write_file(
-            self._tmgr.join_path(self.get_target_dir(), rel_path),
-            f"NAME = {name!r}\nVERSION = {version!r}\n".encode("utf-8"),
-        )
-        meta = PackageMetadata(
+        content = f"NAME = {name!r}\nVERSION = {version!r}\n".encode("utf-8")
+        return PreparedPackage(
             name=name,
             version=version,
-            requirement=espec.extended_spec,
             dependencies=dependencies,
-            files=[rel_path],
+            files={rel_path: content},
         )
-        return self.finalize_package_install(meta, espec)
 
 
 class CyclicDependencyInstaller(DependencyVersionedInstaller):
-    def _install_package_without_dependencies(self, espec, compiler, compile=True):
+    def _prepare_package(self, espec, refresh):
         name = espec.plain_spec
         dependencies = {"a": ["b"], "b": ["a"]}[name]
         rel_path = f"{name}.py"
-        self._tmgr.ensure_dir_and_write_file(
-            self._tmgr.join_path(self.get_target_dir(), rel_path),
-            f"NAME = {name!r}\n".encode("utf-8"),
-        )
-        meta = PackageMetadata(
+        content = f"NAME = {name!r}\n".encode("utf-8")
+        return PreparedPackage(
             name=name,
             version="1.0.0",
-            requirement=espec.extended_spec,
             dependencies=dependencies,
-            files=[rel_path],
+            files={rel_path: content},
         )
-        return self.finalize_package_install(meta, espec)
+
+
+class SharedPathInstaller(Installer):
+    def __init__(self, installer_name, tmgr, target_dir, minny_cache_dir):
+        super().__init__(tmgr, target_dir, minny_cache_dir)
+        self.installer_name = installer_name
+
+    def get_installer_name(self) -> str:
+        return self.installer_name
+
+    def canonicalize_package_name(self, name: str) -> str:
+        return name
+
+    def does_package_candidate_version_satisfy(
+        self, espec: ExtendedSpec, candidate: PackageCandidate
+    ) -> bool:
+        return candidate.version == espec.plain_spec.rsplit("==", maxsplit=1)[1]
+
+    def _parse_plain_spec(self, plain_spec: str) -> ExtendedSpec:
+        name, _ = plain_spec.rsplit("==", maxsplit=1)
+        return ExtendedSpec(
+            editable=False,
+            name=name,
+            location=None,
+            plain_spec=plain_spec,
+            extended_spec=plain_spec,
+        )
+
+    def get_resolved_installation_spec(
+        self, meta: PackageMetadata, base_dir: str | None = None
+    ) -> str:
+        return f"{meta['name']}=={meta['version']}"
+
+    def _prepare_package(self, espec: ExtendedSpec, refresh: bool) -> PreparedPackage:
+        name, version = espec.plain_spec.rsplit("==", maxsplit=1)
+        if name == "a":
+            files = {"shared.py": b"PROVIDER = 'a'\n"}
+        elif version == "1":
+            files = {
+                "shared.py": b"PROVIDER = 'b'\n",
+                "removed.py": b"REMOVED = True\n",
+            }
+        else:
+            files = {"b.py": b"VERSION = 2\n"}
+
+        return PreparedPackage(
+            name=name,
+            version=version,
+            dependencies=[],
+            files=files,
+        )
 
 
 def test_install_traversal_uses_pseudo_root(tmp_path):
@@ -318,26 +359,12 @@ class ReplacingFooInstaller(Installer):
     def canonicalize_package_name(self, name: str) -> str:
         return name
 
-    def slug_package_name(self, name: str) -> str:
-        return name
-
-    def slug_package_version(self, version: str) -> str:
-        return version.replace(".", "_")
-
-    def deslug_package_name(self, name: str) -> str:
-        return name
-
-    def deslug_package_version(self, version: str) -> str:
-        return version.replace("_", ".")
-
     def get_package_latest_version(self, name: str) -> str | None:
         return None
 
-    def is_package_candidate_compatible(
+    def does_package_candidate_version_satisfy(
         self, espec: ExtendedSpec, candidate: PackageCandidate
     ) -> bool:
-        if not self.are_common_candidate_properties_compatible(espec, candidate):
-            return False
         if espec.plain_spec == "foo<2.0.0":
             return candidate.version < "2.0.0"
         if espec.plain_spec == "foo>=2.0.0":
@@ -360,7 +387,7 @@ class ReplacingFooInstaller(Installer):
             extended_spec=plain_spec,
         )
 
-    def _install_package_without_dependencies(self, espec, compiler, compile=True):
+    def _prepare_package(self, espec, refresh):
         if espec.plain_spec == "foo<2.0.0":
             name = "foo"
             version = "1.9.5"
@@ -381,22 +408,17 @@ class ReplacingFooInstaller(Installer):
             raise AssertionError(f"Unexpected spec: {espec.plain_spec}")
 
         rel_path = f"{name}_{version.replace('.', '_')}.py"
-        self._tmgr.ensure_dir_and_write_file(
-            self._tmgr.join_path(self.get_target_dir(), rel_path),
-            f"NAME = {name!r}\nVERSION = {version!r}\n".encode("utf-8"),
-        )
-        meta = PackageMetadata(
+        content = f"NAME = {name!r}\nVERSION = {version!r}\n".encode("utf-8")
+        return PreparedPackage(
             name=name,
             version=version,
-            requirement=espec.extended_spec,
             dependencies=dependencies,
-            files=[rel_path],
+            files={rel_path: content},
         )
-        return self.finalize_package_install(meta, espec)
 
 
 class BackAndForthDependencyInstaller(ReplacingFooInstaller):
-    def _install_package_without_dependencies(self, espec, compiler, compile=True):
+    def _prepare_package(self, espec, refresh):
         if espec.plain_spec == "foo<2.0.0":
             name = "foo"
             version = "1.9.5"
@@ -413,18 +435,13 @@ class BackAndForthDependencyInstaller(ReplacingFooInstaller):
             raise AssertionError(f"Unexpected spec: {espec.plain_spec}")
 
         rel_path = f"{name}_{version.replace('.', '_')}.py"
-        self._tmgr.ensure_dir_and_write_file(
-            self._tmgr.join_path(self.get_target_dir(), rel_path),
-            f"NAME = {name!r}\nVERSION = {version!r}\n".encode("utf-8"),
-        )
-        meta = PackageMetadata(
+        content = f"NAME = {name!r}\nVERSION = {version!r}\n".encode("utf-8")
+        return PreparedPackage(
             name=name,
             version=version,
-            requirement=espec.extended_spec,
             dependencies=dependencies,
-            files=[rel_path],
+            files={rel_path: content},
         )
-        return self.finalize_package_install(meta, espec)
 
 
 def test_repeated_completed_requirement_can_replace_package_again(tmp_path):
@@ -453,12 +470,13 @@ def test_back_and_forth_dependency_cycle_terminates_after_replacement(tmp_path):
     assert traversal.dependency_edges["foo"] == [RequirementEdge("foo<2.0.0", "foo")]
 
 
-def test_sync_command(snapshot):
+@pytest.mark.slow
+def test_sync_command(snapshot, tmp_path):
     """Test that minny sync command produces the expected lib directory structure."""
 
-    # Get paths
-    test_data_dir = Path(__file__).parent / "data" / "projects" / "simple-app-project"
-    project_dir = test_data_dir.absolute()
+    source_project_dir = Path(__file__).parent / "data" / "projects" / "simple-app-project"
+    project_dir = tmp_path / "simple-app-project"
+    shutil.copytree(source_project_dir, project_dir)
     actual_lib_dir = project_dir / ".minny" / "lib"
     lock_path = project_dir / "minny.lock"
     lock_path.unlink(missing_ok=True)
@@ -512,8 +530,6 @@ def test_sync_command(snapshot):
     # Create a snapshot of the lib directory structure
     lib_structure = sorted([str(p.relative_to(actual_lib_dir)) for p in actual_lib_dir.rglob("*")])
     assert lib_structure == snapshot
-    lock_path.unlink(missing_ok=True)
-    shutil.rmtree(project_dir / ".minny")
 
 
 def test_sync_does_not_install_project_from_package_metadata(tmp_path, monkeypatch):
@@ -571,7 +587,14 @@ pip = ["first", "-e .", "last"]
                 )
             return super().parse_extended_spec(extended_spec, base_dir)
 
-        def install_for_project(self, extended_specs, project_path, no_deps=False):
+        def install_for_project(
+            self,
+            extended_specs,
+            project_path,
+            no_deps=False,
+            reinstall=False,
+            upgrade=False,
+        ):
             received_specs.extend(extended_specs)
             return InstallTraversal()
 
@@ -617,7 +640,7 @@ mip = [
     lib_dir = project_dir / ".minny" / "lib"
     assert (lib_dir / "kept_package.py").is_file()
     assert (lib_dir / "obsolete_package.py").is_file()
-    assert (lib_dir / ".mip" / "obsolete%2Dpackage-1.0.0.meta").is_file()
+    assert (lib_dir / ".mip" / "obsolete-package.meta").is_file()
 
     pyproject_toml.write_text(
         f"""
@@ -630,9 +653,9 @@ mip = ["{kept_package.as_posix()}"]
     ProjectManager(str(project_dir), tmgr, str(cache_dir)).sync()
 
     assert (lib_dir / "kept_package.py").is_file()
-    assert (lib_dir / ".mip" / "kept%2Dpackage-1.0.0.meta").is_file()
+    assert (lib_dir / ".mip" / "kept-package.meta").is_file()
     assert not (lib_dir / "obsolete_package.py").exists()
-    assert not (lib_dir / ".mip" / "obsolete%2Dpackage-1.0.0.meta").exists()
+    assert not (lib_dir / ".mip" / "obsolete-package.meta").exists()
 
 
 def test_sync_does_not_create_device_tracking_state(tmp_path):
@@ -686,13 +709,12 @@ mip = ["foo", "blah"]
 
     lib_dir = project_dir / ".minny" / "lib"
     assert not (lib_dir / "foo_2_2_2.py").exists()
-    assert not (lib_dir / ".mip" / "foo-2_2_2.meta").exists()
     assert (lib_dir / "foo_1_9_5.py").is_file()
-    assert (lib_dir / ".mip" / "foo-1_9_5.meta").is_file()
+    assert (lib_dir / ".mip" / "foo.meta").is_file()
     assert (lib_dir / "blah_1_0_0.py").is_file()
-    assert (lib_dir / ".mip" / "blah-1_0_0.meta").is_file()
+    assert (lib_dir / ".mip" / "blah.meta").is_file()
     assert not (lib_dir / "bar_1_0_0.py").exists()
-    assert not (lib_dir / ".mip" / "bar-1_0_0.meta").exists()
+    assert not (lib_dir / ".mip" / "bar.meta").exists()
 
     lock = read_sync_lock(str(project_dir / "minny.lock"))
     assert lock is not None
@@ -731,13 +753,12 @@ mip = ["../foo", "blah"]
 
     lib_dir = project_dir / ".minny" / "lib"
     assert not (lib_dir / "foo_2_2_2.py").exists()
-    assert not (lib_dir / ".mip" / "foo-2_2_2.meta").exists()
     assert (lib_dir / "foo_1_9_5.py").is_file()
-    assert (lib_dir / ".mip" / "foo-1_9_5.meta").is_file()
+    assert (lib_dir / ".mip" / "foo.meta").is_file()
     assert (lib_dir / "blah_1_0_0.py").is_file()
-    assert (lib_dir / ".mip" / "blah-1_0_0.meta").is_file()
+    assert (lib_dir / ".mip" / "blah.meta").is_file()
     assert not (lib_dir / "bar_1_0_0.py").exists()
-    assert not (lib_dir / ".mip" / "bar-1_0_0.meta").exists()
+    assert not (lib_dir / ".mip" / "bar.meta").exists()
 
     lock = read_sync_lock(str(project_dir / "minny.lock"))
     assert lock is not None
@@ -804,11 +825,17 @@ mip = ["mip-package"]
                 f"INSTALLER = {self.installer_name!r}\n", encoding="utf-8"
             )
             for meta in traversal.package_metas.values():
-                meta["files"].append("shared.py")
+                meta["file_hashes"]["shared.py"] = hashlib.sha256(
+                    f"INSTALLER = {self.installer_name!r}\n".encode()
+                ).hexdigest()
+                meta_path = self.get_relative_metadata_path(meta["name"])
+                (self.lib_dir / meta_path).write_text(json.dumps(meta), encoding="utf-8")
             return traversal
 
+    calls = []
+
     def create_colliding_installer(installer_name, tmgr, minny_cache_dir, target_dir=None):
-        return CollidingFakeProjectInstaller(installer_name, project_dir / ".minny" / "lib", [])
+        return CollidingFakeProjectInstaller(installer_name, project_dir / ".minny" / "lib", calls)
 
     monkeypatch.setattr("minny.project.create_installer_by_name", create_colliding_installer)
     caplog.set_level(logging.WARNING, logger="minny.project")
@@ -819,7 +846,112 @@ mip = ["mip-package"]
     assert lock is not None
     assert lock.path_conflicts[0].path == "shared.py"
     assert lock.path_conflicts[0].packages == ["pip:pip-package", "mip:mip-package"]
+    pip_hash = lock.installers["pip"].packages[0].file_hashes["shared.py"]
+    mip_hash = lock.installers["mip"].packages[0].file_hashes["shared.py"]
+    assert pip_hash != mip_hash
+    assert lock.path_conflicts[0].final_sha256 == mip_hash
     assert "'shared.py' is provided by pip:pip-package, mip:mip-package" in caplog.text
+
+    ProjectManager(str(project_dir), DummyTargetManager(str(cache_dir)), str(cache_dir)).sync()
+    assert calls == ["pip", "mip"]
+
+    (project_dir / ".minny" / "lib" / "shared.py").write_text("MODIFIED = True\n", encoding="utf-8")
+    invalidate_sync_state(project_dir)
+    ProjectManager(str(project_dir), DummyTargetManager(str(cache_dir)), str(cache_dir)).sync()
+    assert calls == ["pip", "mip", "pip", "mip"]
+    assert (project_dir / ".minny" / "lib" / "shared.py").read_text(
+        encoding="utf-8"
+    ) == "INSTALLER = 'mip'\n"
+
+
+def test_sync_reinstalls_overwritten_provider_and_defers_obsolete_file_cleanup(
+    tmp_path, monkeypatch
+):
+    project_dir = tmp_path / "project"
+    cache_dir = tmp_path / "cache"
+    project_dir.mkdir()
+    cache_dir.mkdir()
+    pyproject_path = project_dir / "pyproject.toml"
+    pyproject_path.write_text(
+        """
+[tool.minny.dependencies]
+pip = ["a==1"]
+mip = ["b==1"]
+""",
+        encoding="utf-8",
+    )
+
+    def create_shared_path_installer(installer_name, tmgr, minny_cache_dir, target_dir=None):
+        return SharedPathInstaller(installer_name, tmgr, target_dir, minny_cache_dir)
+
+    monkeypatch.setattr("minny.project.create_installer_by_name", create_shared_path_installer)
+
+    tmgr = DummyTargetManager(str(cache_dir))
+    ProjectManager(str(project_dir), tmgr, str(cache_dir)).sync()
+
+    lib_dir = project_dir / ".minny" / "lib"
+    shared_path = lib_dir / "shared.py"
+    assert shared_path.read_text(encoding="utf-8") == "PROVIDER = 'b'\n"
+    assert (lib_dir / "removed.py").is_file()
+
+    pyproject_path.write_text(
+        """
+[tool.minny.dependencies]
+pip = ["a==1"]
+mip = ["b==2"]
+""",
+        encoding="utf-8",
+    )
+    ProjectManager(str(project_dir), tmgr, str(cache_dir)).sync()
+
+    assert shared_path.read_text(encoding="utf-8") == "PROVIDER = 'a'\n"
+    assert (lib_dir / "b.py").is_file()
+    assert not (lib_dir / "removed.py").exists()
+
+
+def test_sync_keeps_fixed_file_claimed_by_editable_package(tmp_path, monkeypatch):
+    project_dir = tmp_path / "project"
+    editable_dir = tmp_path / "editable"
+    cache_dir = tmp_path / "cache"
+    project_dir.mkdir()
+    editable_dir.mkdir()
+    cache_dir.mkdir()
+    (editable_dir / "editable.py").write_text("PROVIDER = 'editable'\n", encoding="utf-8")
+    (editable_dir / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "editable",
+                "version": "1",
+                "urls": [["shared.py", "editable.py"]],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (project_dir / "pyproject.toml").write_text(
+        f"""
+[tool.minny.dependencies]
+pip = ["a==1"]
+mip = ["-e {editable_dir.as_posix()}"]
+""",
+        encoding="utf-8",
+    )
+
+    def create_installer(installer_name, tmgr, minny_cache_dir, target_dir=None):
+        if installer_name == "pip":
+            return SharedPathInstaller(installer_name, tmgr, target_dir, minny_cache_dir)
+        return MipInstaller(tmgr, target_dir, minny_cache_dir)
+
+    monkeypatch.setattr("minny.project.create_installer_by_name", create_installer)
+
+    ProjectManager(
+        str(project_dir),
+        DummyTargetManager(str(cache_dir)),
+        str(cache_dir),
+    ).sync()
+
+    assert (project_dir / ".minny" / "lib" / "shared.py").read_text(
+        encoding="utf-8"
+    ) == "PROVIDER = 'a'\n"
 
 
 def test_sync_writes_lockfile_after_install(tmp_path):
@@ -846,6 +978,9 @@ mip = ["{spec}"]
     lock = read_sync_lock(str(project_dir / "minny.lock"))
     assert lock is not None
     assert set(lock.installers) == {"mip"}
+    sync_state = read_sync_state(str(project_dir / ".minny" / "sync-state.json"))
+    assert sync_state is not None
+    assert sync_state.matches_lock_file(str(project_dir / "minny.lock"))
 
     mip_section = lock.installers["mip"]
     assert mip_section.inputs[0].spec == spec
@@ -857,7 +992,206 @@ mip = ["{spec}"]
     assert package.resolved_spec == spec
     assert package.requirement == spec
     assert package.dependencies == []
-    assert package.files == ["locked_package.py", ".mip/locked%2Dpackage-1.0.0.meta"]
+    assert package.file_hashes == {
+        "locked_package.py": hashlib.sha256(b"NAME = 'locked-package'\n").hexdigest()
+    }
+    assert package.generated_files == [".mip/locked-package.meta"]
+    installed_meta = json.loads(
+        (project_dir / ".minny" / "lib" / ".mip" / "locked-package.meta").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert (
+        installed_meta["file_hashes"]["locked_package.py"]
+        == package.file_hashes["locked_package.py"]
+    )
+    assert installed_meta["file_hashes"][".mip/locked-package.meta"] is None
+
+
+def test_sync_reinstall_preserves_lock_selection_and_upgrade_resolves_afresh(tmp_path, monkeypatch):
+    project_dir = tmp_path / "project"
+    cache_dir = tmp_path / "cache"
+    project_dir.mkdir()
+    cache_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        """
+[tool.minny.dependencies]
+mip = ["foo"]
+""",
+        encoding="utf-8",
+    )
+    available_version = "1.0.0"
+    fail_download = False
+    requested_versions = []
+
+    def download_and_parse_json(url):
+        if fail_download:
+            raise RuntimeError("download failed")
+        requested_version = url.rsplit("/", maxsplit=1)[1].removesuffix(".json")
+        requested_versions.append(requested_version)
+        version = available_version if requested_version == "latest" else requested_version
+        return {
+            "name": "foo",
+            "version": version,
+            "urls": [["foo.py", f"https://example.com/foo-{version}.py"]],
+        }
+
+    monkeypatch.setattr(minny.mip, "download_and_parse_json", download_and_parse_json)
+    monkeypatch.setattr(
+        minny.mip,
+        "download_bytes",
+        lambda url: f"VERSION = {url.rsplit('-', maxsplit=1)[1][:-3]!r}\n".encode(),
+    )
+    manager = ProjectManager(
+        str(project_dir),
+        DummyTargetManager(str(cache_dir)),
+        str(cache_dir),
+    )
+
+    manager.sync()
+    initial_lock = read_sync_lock(str(project_dir / "minny.lock"))
+    assert initial_lock is not None
+    assert initial_lock.installers["mip"].packages[0].version == "1.0.0"
+
+    available_version = "2.0.0"
+    requested_versions.clear()
+    manager.sync(reinstall=True)
+
+    assert requested_versions == ["1.0.0"]
+    assert read_sync_lock(str(project_dir / "minny.lock")) == initial_lock
+    assert (project_dir / ".minny" / "lib" / "foo.py").read_text(
+        encoding="utf-8"
+    ) == "VERSION = '1.0.0'\n"
+
+    fail_download = True
+    with pytest.raises(RuntimeError, match="download failed"):
+        manager.sync(upgrade=True)
+    assert read_sync_lock(str(project_dir / "minny.lock")) == initial_lock
+    assert not (project_dir / ".minny" / "sync-state.json").exists()
+
+    fail_download = False
+    requested_versions.clear()
+    manager.sync(upgrade=True)
+
+    assert requested_versions == ["latest"]
+    upgraded_lock = read_sync_lock(str(project_dir / "minny.lock"))
+    assert upgraded_lock is not None
+    assert upgraded_lock.installers["mip"].packages[0].version == "2.0.0"
+    assert (project_dir / ".minny" / "lib" / "foo.py").read_text(
+        encoding="utf-8"
+    ) == "VERSION = '2.0.0'\n"
+
+
+def test_sync_warns_when_same_version_package_files_change(tmp_path, caplog):
+    project_dir = tmp_path / "project"
+    packages_dir = tmp_path / "packages"
+    cache_dir = tmp_path / "cache"
+    project_dir.mkdir()
+    packages_dir.mkdir()
+    cache_dir.mkdir()
+
+    package_dir = create_local_mip_package(packages_dir, "changing-package")
+    spec = package_dir.as_posix()
+    (project_dir / "pyproject.toml").write_text(
+        f"""
+[tool.minny.dependencies]
+mip = ["{spec}"]
+""",
+        encoding="utf-8",
+    )
+
+    tmgr = DummyTargetManager(str(cache_dir))
+    ProjectManager(str(project_dir), tmgr, str(cache_dir)).sync()
+
+    (package_dir / "changing_package.py").write_text("VALUE = 2\n", encoding="utf-8")
+    (package_dir / "extra.py").write_text("EXTRA = True\n", encoding="utf-8")
+    (package_dir / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "changing-package",
+                "version": "1.0.0",
+                "urls": [
+                    ["changing_package.py", "changing_package.py"],
+                    ["extra.py", "extra.py"],
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (project_dir / ".minny" / "lib" / "changing_package.py").unlink()
+    invalidate_sync_state(project_dir)
+
+    caplog.set_level(logging.WARNING, logger="minny.project")
+    ProjectManager(str(project_dir), tmgr, str(cache_dir)).sync()
+
+    assert "Package files changed without a version change" in caplog.text
+    assert "mip:changing-package 1.0.0" in caplog.text
+    assert "added: extra.py" in caplog.text
+    assert "modified: changing_package.py" in caplog.text
+
+
+def test_sync_repairs_modified_locked_file_when_replay_can_reproduce_it(tmp_path, caplog):
+    project_dir = tmp_path / "project"
+    packages_dir = tmp_path / "packages"
+    cache_dir = tmp_path / "cache"
+    project_dir.mkdir()
+    packages_dir.mkdir()
+    cache_dir.mkdir()
+
+    package_dir = create_local_mip_package(packages_dir, "repairable-package")
+    (project_dir / "pyproject.toml").write_text(
+        f"""
+[tool.minny.dependencies]
+mip = ["{package_dir.as_posix()}"]
+""",
+        encoding="utf-8",
+    )
+
+    tmgr = DummyTargetManager(str(cache_dir))
+    ProjectManager(str(project_dir), tmgr, str(cache_dir)).sync()
+    installed_file = project_dir / ".minny" / "lib" / "repairable_package.py"
+    expected_content = installed_file.read_bytes()
+    installed_file.write_text("MODIFIED = True\n", encoding="utf-8")
+    invalidate_sync_state(project_dir)
+
+    caplog.set_level(logging.WARNING, logger="minny.project")
+    ProjectManager(str(project_dir), tmgr, str(cache_dir)).sync()
+
+    assert installed_file.read_bytes() == expected_content
+    assert "Package files changed without a version change" not in caplog.text
+
+
+def test_sync_rematerializes_modified_compatible_package(tmp_path, monkeypatch, caplog):
+    project_dir = tmp_path / "project"
+    cache_dir = tmp_path / "cache"
+    project_dir.mkdir()
+    cache_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        """
+[tool.minny.dependencies]
+mip = ["foo"]
+""",
+        encoding="utf-8",
+    )
+
+    def create_test_installer(installer_name, tmgr, minny_cache_dir, target_dir=None):
+        if installer_name == "mip":
+            return VersionedInstaller(tmgr, target_dir, minny_cache_dir)
+        return FakeProjectInstaller(installer_name, project_dir / ".minny" / "lib", [])
+
+    monkeypatch.setattr("minny.project.create_installer_by_name", create_test_installer)
+    tmgr = DummyTargetManager(str(cache_dir))
+    ProjectManager(str(project_dir), tmgr, str(cache_dir)).sync()
+    installed_file = project_dir / ".minny" / "lib" / "foo_2_0_0.py"
+    expected_content = installed_file.read_bytes()
+    installed_file.write_text("MODIFIED = True\n", encoding="utf-8")
+    invalidate_sync_state(project_dir)
+
+    caplog.set_level(logging.WARNING, logger="minny.project")
+    ProjectManager(str(project_dir), tmgr, str(cache_dir)).sync()
+
+    assert installed_file.read_bytes() == expected_content
+    assert "Package files changed without a version change" not in caplog.text
 
 
 def test_lock_package_name_is_canonical(tmp_path):
@@ -869,7 +1203,7 @@ def test_lock_package_name_is_canonical(tmp_path):
     installer = PipInstaller(
         DummyTargetManager(str(cache_dir)), target_dir=None, minny_cache_dir=str(cache_dir)
     )
-    meta = PackageMetadata(name="Friendly_Bard", version="1.0.0", files=[])
+    meta = PackageMetadata(name="Friendly_Bard", version="1.0.0", file_hashes={})
 
     package = manager._create_syncer()._build_lock_package(installer, meta)
 
@@ -888,42 +1222,26 @@ def test_sync_rejects_bad_project_lock(tmp_path):
         ProjectManager(str(project_dir), tmgr, str(cache_dir)).sync()
 
 
-def test_sync_ignores_lock_and_trusts_library_when_locking_is_disabled(tmp_path, monkeypatch):
+def test_library_path_resolution_rejects_symlink_escape(tmp_path):
     project_dir = tmp_path / "project"
     cache_dir = tmp_path / "cache"
+    lib_dir = project_dir / ".minny" / "lib"
+    outside_dir = tmp_path / "outside"
     project_dir.mkdir()
     cache_dir.mkdir()
-    (project_dir / "pyproject.toml").write_text(
-        """
-[tool.minny.dependencies]
-mip = ["mip-package"]
-""",
-        encoding="utf-8",
-    )
-    lock_path = project_dir / "minny.lock"
-    lock_path.write_text("not valid TOML", encoding="utf-8")
-    calls = []
+    lib_dir.mkdir(parents=True)
+    outside_dir.mkdir()
+    try:
+        (lib_dir / "linked").symlink_to(outside_dir, target_is_directory=True)
+    except OSError as e:
+        pytest.skip(f"Could not create test symlink: {e}")
 
-    def create_fake_installer(installer_name, tmgr, minny_cache_dir, target_dir=None):
-        return FakeProjectInstaller(installer_name, project_dir / ".minny" / "lib", calls)
+    syncer = ProjectManager(
+        str(project_dir), DummyTargetManager(str(cache_dir)), str(cache_dir)
+    )._create_syncer()
 
-    monkeypatch.setattr("minny.project.LOCKING_ENABLED", False)
-    monkeypatch.setattr("minny.project.create_installer_by_name", create_fake_installer)
-    tmgr = DummyTargetManager(str(cache_dir))
-    ProjectManager(str(project_dir), tmgr, str(cache_dir)).sync()
-
-    state_path = project_dir / ".minny" / "sync-state.json"
-    first_state = state_path.read_bytes()
-    installed_file = project_dir / ".minny" / "lib" / "mip_mip_package.py"
-    installed_file.unlink()
-    calls.clear()
-
-    ProjectManager(str(project_dir), tmgr, str(cache_dir)).sync()
-
-    assert calls == []
-    assert not installed_file.exists()
-    assert state_path.read_bytes() == first_state
-    assert lock_path.read_text(encoding="utf-8") == "not valid TOML"
+    with pytest.raises(UserError, match="escapes the library directory"):
+        syncer._resolve_lib_path("linked/important.py")
 
 
 def test_sync_fast_path_leaves_library_and_lock_unchanged(tmp_path):
@@ -1061,6 +1379,8 @@ mip = ["second-package"]
             extended_specs: list[str],
             project_path: str,
             no_deps: bool = False,
+            reinstall: bool = False,
+            upgrade: bool = False,
         ) -> InstallTraversal:
             self.lib_dir.mkdir(parents=True, exist_ok=True)
             (self.lib_dir / "partially-installed.py").write_text(
@@ -1080,36 +1400,6 @@ mip = ["second-package"]
     assert (project_dir / ".minny" / "lib" / "partially-installed.py").is_file()
     assert not state_path.exists()
     assert lock_path.read_bytes() == first_lock
-
-
-def test_sync_invokes_installer_when_locked_file_is_missing(tmp_path):
-    project_dir = tmp_path / "project"
-    packages_dir = tmp_path / "packages"
-    cache_dir = tmp_path / "cache"
-    project_dir.mkdir()
-    packages_dir.mkdir()
-    cache_dir.mkdir()
-
-    package_dir = create_local_mip_package(packages_dir, "reinstalled-package")
-    spec = package_dir.as_posix()
-    (project_dir / "pyproject.toml").write_text(
-        f"""
-[tool.minny.dependencies]
-mip = ["{spec}"]
-""",
-        encoding="utf-8",
-    )
-
-    tmgr = DummyTargetManager(str(cache_dir))
-    ProjectManager(str(project_dir), tmgr, str(cache_dir)).sync()
-
-    lib_dir = project_dir / ".minny" / "lib"
-    installed_module = lib_dir / "reinstalled_package.py"
-    installed_module.unlink()
-
-    ProjectManager(str(project_dir), tmgr, str(cache_dir)).sync()
-
-    assert installed_module.is_file()
 
 
 def test_sync_invokes_installer_when_top_level_inputs_change(tmp_path):
@@ -1180,6 +1470,7 @@ mip = ["foo"]
     assert (lib_dir / "foo_2_0_0.py").is_file()
 
     (lib_dir / "foo_2_0_0.py").unlink()
+    invalidate_sync_state(project_dir)
     VersionedInstaller.latest_version = "3.0.0"
     ProjectManager(str(project_dir), tmgr, str(cache_dir)).sync()
 
@@ -1204,9 +1495,22 @@ mip = ["first", "second"]
     invocations = []
 
     class RecordingInstaller(FakeProjectInstaller):
-        def install_for_project(self, extended_specs, project_path, no_deps=False):
+        def install_for_project(
+            self,
+            extended_specs,
+            project_path,
+            no_deps=False,
+            reinstall=False,
+            upgrade=False,
+        ):
             invocations.append((extended_specs, no_deps))
-            return super().install_for_project(extended_specs, project_path, no_deps)
+            return super().install_for_project(
+                extended_specs,
+                project_path,
+                no_deps,
+                reinstall,
+                upgrade,
+            )
 
     def create_recording_installer(installer_name, tmgr, minny_cache_dir, target_dir=None):
         return RecordingInstaller(installer_name, project_dir / ".minny" / "lib", [])
@@ -1221,6 +1525,7 @@ mip = ["first", "second"]
     lib_dir = project_dir / ".minny" / "lib"
     (lib_dir / "mip_first.py").unlink()
     (lib_dir / "leftover.py").write_text("LEFTOVER = True\n", encoding="utf-8")
+    invalidate_sync_state(project_dir)
 
     ProjectManager(str(project_dir), tmgr, str(cache_dir)).sync()
 
@@ -1263,6 +1568,7 @@ mip = ["root"]
     assert (lib_dir / "foo_2_0_0.py").is_file()
 
     (lib_dir / "foo_2_0_0.py").unlink()
+    invalidate_sync_state(project_dir)
     DependencyVersionedInstaller.latest_version = "3.0.0"
     ProjectManager(str(project_dir), tmgr, str(cache_dir)).sync()
 
@@ -1332,8 +1638,9 @@ mip = ["{spec}"]
     ProjectManager(str(project_dir), tmgr, str(cache_dir)).sync()
 
     lib_dir = project_dir / ".minny" / "lib"
-    meta_path = lib_dir / ".mip" / "metadata%2Dpackage-1.0.0.meta"
+    meta_path = lib_dir / ".mip" / "metadata-package.meta"
     meta_path.unlink()
+    invalidate_sync_state(project_dir)
 
     ProjectManager(str(project_dir), tmgr, str(cache_dir)).sync()
 
@@ -1368,6 +1675,7 @@ mip = ["mip-package"]
     calls.clear()
     stale_mip_file = project_dir / ".minny" / "lib" / "mip_mip_package.py"
     stale_mip_file.unlink()
+    invalidate_sync_state(project_dir)
 
     ProjectManager(str(project_dir), tmgr, str(cache_dir)).sync()
 
@@ -1516,7 +1824,8 @@ mip = ["-e {package_dir.as_posix()}"]
     assert lock is not None
     package = lock.installers["mip"].packages[0]
     assert not module_path.exists()
-    assert package.files == [".mip/mode%2Dpackage-1.0.0.meta"]
+    assert package.file_hashes == {}
+    assert package.generated_files == [".mip/mode-package.meta"]
     assert [(item.source, item.target) for item in package.editable_files] == [
         ("mode_package.py", "mode_package.py")
     ]
@@ -1561,49 +1870,6 @@ mip = ["{package_dir.as_posix()}"]
     assert lock is not None
     package = lock.installers["mip"].packages[0]
     assert module_path.is_file()
-    assert package.files == ["mode_package.py", ".mip/mode%2Dpackage-1.0.0.meta"]
+    assert set(package.file_hashes) == {"mode_package.py"}
+    assert package.generated_files == [".mip/mode-package.meta"]
     assert package.editable_files == []
-
-
-def test_sync_ignores_unknown_lock_sections(tmp_path):
-    project_dir = tmp_path / "project"
-    packages_dir = tmp_path / "packages"
-    cache_dir = tmp_path / "cache"
-    project_dir.mkdir()
-    packages_dir.mkdir()
-    cache_dir.mkdir()
-
-    package_dir = create_local_mip_package(packages_dir, "known-package")
-    spec = package_dir.as_posix()
-    (project_dir / "pyproject.toml").write_text(
-        f"""
-[tool.minny.dependencies]
-mip = ["{spec}"]
-""",
-        encoding="utf-8",
-    )
-
-    tmgr = DummyTargetManager(str(cache_dir))
-    ProjectManager(str(project_dir), tmgr, str(cache_dir)).sync()
-
-    lock_path = project_dir / "minny.lock"
-    lock_path.write_text(
-        lock_path.read_text(encoding="utf-8")
-        + """
-[[future.inputs]]
-spec = "future-package"
-
-[[future.packages]]
-name = "future-package"
-version = "1.0.0"
-requirement = "future-package"
-files = ["future.py"]
-""",
-        encoding="utf-8",
-    )
-
-    ProjectManager(str(project_dir), tmgr, str(cache_dir)).sync()
-
-    lock = read_sync_lock(str(lock_path))
-    assert lock is not None
-    assert set(lock.installers) == {"mip"}

@@ -6,17 +6,7 @@ Status: Draft
 
 Pip distributions, mip packages, and CircuitPython bundle packages use different identities, metadata, and naming rules. Similar names across these ecosystems do not necessarily identify the same package.
 
-Path overlap can also occur legitimately within one installer namespace. For example, the micropython-lib [`html` manifest](https://raw.githubusercontent.com/micropython/micropython-lib/refs/heads/master/python-stdlib/html/manifest.py) declares `string` as a dependency:
-
-```python
-require("string")
-
-package("html")
-```
-
-The published mip index expands this dependency into the [`html` package record](https://micropython.org/pi/v2/package/py/html/latest.json), which contains `string/__init__.py` and `string/templatelib.py` alongside `html/__init__.py`, but no longer contains the dependency link. The standalone [`string` package record](https://micropython.org/pi/v2/package/py/string/latest.json) contains the same two `string` paths. At the time this example was recorded, both records specified the same hashes for these files.
-
-Installing both packages therefore produces overlapping file claims in the `mip` namespace even though the overlap comes from normal index construction and the file contents agree. A package's recorded files may describe a flattened installation closure rather than exclusive ownership of every path.
+Their installed files nevertheless share one library directory. File overlap is not always an error: some package records include files from their dependencies instead of containing only files owned by that package. If such a dependency is also selected separately, both records legitimately claim the same path, as happens with the mip packages `html` and `string`.
 
 ### Decision
 
@@ -24,12 +14,28 @@ Dependencies and installed packages remain grouped by installer namespace. Each 
 
 Minny may perform explicit translations supported by ecosystem metadata, but it does not create a universal package namespace.
 
-Project sync installs configured namespaces in the fixed order `pip`, `mip`, `circup`. After any fast-sync miss, it invokes every configured installer with non-empty inputs in this order.
+Project sync combines the namespaces in the fixed order `pip`, `mip`, `circup`. This order defines the final content when packages write different bytes to the same path. Minny reports overlaps but does not reject them.
 
-Minny reports cross-namespace path conflicts. The fixed order determines the result of a clean installation, but it does not guarantee the content of a conflicting path during incremental reuse. An installer may reuse a compatible installed package without rewriting its files, so resolving such a conflict reliably requires rebuilding the local library.
+Cleanup is also combined across installers and happens after they have all completed. A path is removed only when no reachable package supplies it, so updating one package cannot delete a shared path which still belongs to another package.
 
 ### Consequences
 
-The same name may refer to separate packages in different installer namespaces. Minny combines their file outcomes and reports cross-namespace conflicts without merging their package identities.
+The same name may refer to separate packages in different namespaces. Minny combines their file outcomes without merging their identities.
 
-Installer order is observable behavior for files written during installation. Invoking all configured installers after a fast-path miss can do more work than per-installer invalidation, but it keeps cleanup, locking, and conflict reporting based on one combined sync operation.
+Installer order is observable when files overlap. A full project update may do more work than independent per-installer updates, but clean and incremental syncs have the same deterministic precedence.
+
+Conflict reports are diagnostic. A different-content overlap may indicate a questionable dependency combination, but it may also be an unavoidable result of upstream packaging.
+
+### Alternatives considered
+
+#### Use one package namespace
+
+A universal namespace would make same-named packages appear interchangeable even when their ecosystems disagree about identity, versioning, or installed contents. Explicit ecosystem translations are safer than broad equivalence rules.
+
+#### Reject overlapping paths whose contents differ
+
+This would turn legitimate flattened closures into installation failures. Avoiding partial writes would also require preflighting the complete combined installation, including reused and editable packages. Minny instead reports the ambiguity and applies a deterministic precedence rule.
+
+#### Update installer namespaces independently
+
+Per-installer invalidation would avoid some work, but an incremental update could then produce different overlapping-file precedence from a clean sync. Minny favors one reproducible combined outcome.
