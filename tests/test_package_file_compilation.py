@@ -1,3 +1,4 @@
+import os
 from typing import cast
 
 import pytest
@@ -7,7 +8,7 @@ from minny.compiling import Compiler
 from minny.dir_target import DirTargetManager
 from minny.installer import ExtendedSpec, PreparedPackage
 from minny.pip import PipInstaller
-from minny.project import ProjectManager
+from minny.project import DeployActionKind, PlannedFile, ProjectManager
 
 
 class _FailingCompiler:
@@ -16,6 +17,18 @@ class _FailingCompiler:
 
     def get_module_format(self) -> str:
         raise AssertionError("Module format requested for a non-Python file")
+
+
+class _RecordingCompiler:
+    def __init__(self):
+        self.compiled_paths: list[tuple[str, str]] = []
+
+    def compile_to_bytes(self, source_path: str, target_path: str) -> bytes:
+        self.compiled_paths.append((source_path, target_path))
+        return b"compiled"
+
+    def get_module_format(self) -> str:
+        return "mpy-test"
 
 
 class _PreparedPackageInstaller(PipInstaller):
@@ -171,3 +184,62 @@ def test_package_deploy_does_not_compile_or_mark_data_as_module(tmp_path):
     tracked_info = tmgr.tracker.get_tracked_file_info(str(target_dir / deployed_path))
     assert tracked_info is not None
     assert "module_format" not in tracked_info
+
+
+def test_package_deploy_uses_tracking_fast_path_before_compiling(tmp_path):
+    project_dir = tmp_path / "project"
+    target_dir = tmp_path / "target"
+    project_dir.mkdir()
+    target_dir.mkdir()
+    source_path = tmp_path / "module.py"
+    source_path.write_text("VALUE = 1\n", encoding="utf-8")
+    tmgr = DirTargetManager(str(target_dir), str(tmp_path / "cache"))
+    deployer = ProjectManager(str(project_dir), tmgr, str(tmp_path / "cache"))._create_deployer()
+    compiler = _RecordingCompiler()
+
+    for _ in range(2):
+        deployer._smart_deploy_file(
+            str(source_path),
+            str(target_dir),
+            "module.py",
+            compile=True,
+            compiler=cast(Compiler, compiler),
+        )
+
+    assert compiler.compiled_paths == [(str(source_path), "module.py")]
+    assert (target_dir / "module.mpy").read_bytes() == b"compiled"
+
+
+def test_apply_records_source_information_captured_during_planning(tmp_path):
+    project_dir = tmp_path / "project"
+    target_dir = tmp_path / "target"
+    project_dir.mkdir()
+    target_dir.mkdir()
+    source_path = tmp_path / "module.py"
+    source_path.write_text("VALUE = 1\n", encoding="utf-8")
+    tmgr = DirTargetManager(str(target_dir), str(tmp_path / "cache"))
+    deployer = ProjectManager(str(project_dir), tmgr, str(tmp_path / "cache"))._create_deployer()
+    target_path = str(target_dir / "module.py")
+
+    action = deployer._prepare_file(
+        PlannedFile(
+            source_abs_path=str(source_path),
+            original_target_rel_path="module.py",
+            target_path=target_path,
+            compile=False,
+        ),
+        cast(Compiler, _FailingCompiler()),
+    )
+    assert action.kind is DeployActionKind.WRITE
+    assert action.source_info is not None
+    planned_mtime = action.source_info.mtime
+
+    source_path.write_text("VALUE = 2\n", encoding="utf-8")
+    os.utime(source_path, (planned_mtime + 10, planned_mtime + 10))
+    deployer._apply_prepared_action(action)
+
+    tracked_info = tmgr.tracker.get_tracked_file_info(target_path)
+    assert tracked_info is not None
+    assert (target_dir / "module.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert tracked_info["source_mtime"] == planned_mtime
+    assert tracked_info["source_mtime"] != source_path.stat().st_mtime

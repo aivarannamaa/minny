@@ -2,13 +2,32 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from logging import getLogger
-from typing import Any
+from typing import Any, Literal
 
 from minny.common import UserError
 
 logger = getLogger(__name__)
 
 INSTALLER_NAMES = ("pip", "mip", "circup")
+DEFAULT_NO_DELETE_PATTERNS = [
+    "/sd",
+    "/rom",
+    "/ram",
+    "/boot.py",
+    "/boot.txt",
+    "/flash/boot.py",
+    "/safemode.py",
+    "/safemode.txt",
+    "/repl.py",
+    "/flash/SKIPSD",
+    "/settings.toml",
+    "/webrepl_cfg.py",
+    "/flash/webrepl_cfg.py",
+    "/boot_out.txt",
+    "/.*",
+    "/flash/.*",
+]
+CompileSetting = Literal["auto"] | list[str]
 
 
 @dataclass
@@ -20,17 +39,17 @@ class DependenciesTable:
 
 @dataclass
 class DeployFilesItem:
-    source: str
-    destination: str
+    source_dir: str
+    target_dir: str
     include: list[str]
     exclude: list[str]
-    compile: list[str]
+    compile: CompileSetting
     no_compile: list[str]
 
 
 @dataclass
 class DeployPackagesItem:
-    destination: str
+    target_dir: str
     include: list[str]
     exclude: list[str]
     compile: list[str]
@@ -41,6 +60,7 @@ class DeployPackagesItem:
 class DeployTable:
     files: list[DeployFilesItem]
     packages: list[DeployPackagesItem]
+    no_delete: list[str]
 
 
 @dataclass
@@ -79,10 +99,16 @@ class SettingsReader:
         )
 
     def read_minny_deploy_table(self, context: Any, path: str, context_path: str) -> DeployTable:
-        table = self.read_table(context, path, {}, ["files", "packages"], context_path=context_path)
+        table = self.read_table(
+            context,
+            path,
+            {},
+            ["files", "packages", "no-delete"],
+            context_path=context_path,
+        )
         table_abs_path = self._join_paths(context_path, path)
         files = self.read_mapped_array(
-            table, "files", [{}], self.read_minny_deploy_files_item, context_path=table_abs_path
+            table, "files", [], self.read_minny_deploy_files_item, context_path=table_abs_path
         )
         packages = self.read_mapped_array(
             table,
@@ -95,6 +121,12 @@ class SettingsReader:
         return DeployTable(
             files=files,
             packages=packages,
+            no_delete=self.read_string_array(
+                table,
+                "no-delete",
+                DEFAULT_NO_DELETE_PATTERNS.copy(),
+                context_path=table_abs_path,
+            ),
         )
 
     def read_minny_deploy_files_item(
@@ -104,17 +136,19 @@ class SettingsReader:
             context,
             path,
             {},
-            ["source", "destination", "include", "exclude", "compile"],
+            ["source-dir", "target-dir", "include", "exclude", "compile", "no-compile"],
             context_path=context_path,
         )
         table_abs_path = self._join_paths(context_path, path)
 
         return DeployFilesItem(
-            source=self.read_string(table, "source", "auto", context_path=table_abs_path),
-            destination=self.read_string(table, "destination", "auto", context_path=table_abs_path),
+            source_dir=self.read_string(table, "source-dir", ".", context_path=table_abs_path),
+            target_dir=self.read_string(table, "target-dir", "auto", context_path=table_abs_path),
             include=self.read_string_array(table, "include", [], context_path=table_abs_path),
             exclude=self.read_string_array(table, "exclude", [], context_path=table_abs_path),
-            compile=self.read_string_array(table, "compile", [], context_path=table_abs_path),
+            compile=self.read_compile_setting(
+                table, "compile", "auto", context_path=table_abs_path
+            ),
             no_compile=self.read_string_array(table, "no-compile", [], context_path=table_abs_path),
         )
 
@@ -125,13 +159,13 @@ class SettingsReader:
             context,
             path,
             {},
-            ["destination", "include", "exclude", "compile"],
+            ["target-dir", "include", "exclude", "compile", "no-compile"],
             context_path=context_path,
         )
         table_abs_path = self._join_paths(context_path, path)
 
         return DeployPackagesItem(
-            destination=self.read_string(table, "destination", "auto", context_path=table_abs_path),
+            target_dir=self.read_string(table, "target-dir", "auto", context_path=table_abs_path),
             include=self.read_mapped_array(
                 table,
                 "include",
@@ -204,6 +238,26 @@ class SettingsReader:
             context, path, default, self.read_string_no_default, context_path=context_path
         )
 
+    def read_compile_setting(
+        self,
+        context: Any,
+        path: str,
+        default: CompileSetting,
+        context_path: str,
+    ) -> CompileSetting:
+        obj = self.read_setting(context, path, default, context_path)
+        obj_abs_path = self._join_paths(context_path, path)
+        if obj == "auto":
+            return "auto"
+        if not isinstance(obj, list):
+            raise UserError(f"{obj_abs_path} must be 'auto' or an array of strings")
+        patterns = [
+            self.read_string_no_default(obj, f"[{i}]", obj_abs_path) for i in range(len(obj))
+        ]
+        if "auto" in patterns:
+            raise UserError(f"{obj_abs_path} must use scalar 'auto', not include it as a pattern")
+        return patterns
+
     def read_array(self, context: Any, path: str, default: list, context_path: str) -> list[Any]:
         obj = self.read_setting(context, path, default, context_path)
         obj_abs_path = self._join_paths(context_path, path)
@@ -229,6 +283,14 @@ class SettingsReader:
 
         if not isinstance(obj, str):
             raise UserError(f"{obj_abs_path} must be a string")
+
+        return obj
+
+    def read_bool(self, context: Any, path: str, default: bool, context_path: str) -> bool:
+        obj = self.read_setting(context, path, default, context_path)
+        obj_abs_path = self._join_paths(context_path, path)
+        if not isinstance(obj, bool):
+            raise UserError(f"{obj_abs_path} must be a boolean")
 
         return obj
 

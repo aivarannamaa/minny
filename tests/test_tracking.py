@@ -4,7 +4,7 @@ import zlib
 from minny.dir_target import DirTargetManager
 
 
-def test_new_tracking_cookie_does_not_record_directory_info_implicitly(tmp_path):
+def test_new_tracking_cookie_records_only_its_owned_directory_info(tmp_path):
     cache_dir = tmp_path / "cache"
     target_dir = tmp_path / "target"
     cache_dir.mkdir()
@@ -30,8 +30,20 @@ def test_new_tracking_cookie_does_not_record_directory_info_implicitly(tmp_path)
 
     assert existing_file_path not in tracked_files
     assert "crc32" in tracked_files[new_file_path]
-    assert tracking_data["tracked_folders"] == {}
+    assert tracking_data["tracked_folders"] == {str(target_dir / ".minny"): {"cookie": "file"}}
     assert "tracked_packages" not in tracking_data
+
+
+def test_reading_missing_tracking_info_does_not_create_cookie(tmp_path):
+    cache_dir = tmp_path / "cache"
+    target_dir = tmp_path / "target"
+    cache_dir.mkdir()
+    target_dir.mkdir()
+    tmgr = DirTargetManager(str(target_dir), str(cache_dir))
+
+    assert tmgr.tracker.get_tracked_file_info(str(target_dir / "missing.py")) is None
+    assert tmgr.get_existing_tracking_cookie() is None
+    assert not (cache_dir / "devices").exists()
 
 
 def test_record_file_records_source_info(tmp_path):

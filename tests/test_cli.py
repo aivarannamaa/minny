@@ -35,6 +35,75 @@ def test_sync_help_does_not_offer_target_selection_arguments(capsys):
     assert "--port" not in help_text
     assert "--mount" not in help_text
     assert "--dir" not in help_text
+    assert "--utc" not in help_text
+    assert "--sync-rtc" not in help_text
+
+
+@pytest.mark.parametrize("command", ["cache", "sync"])
+@pytest.mark.parametrize("option", ["--utc", "--sync-rtc"])
+@pytest.mark.parametrize("option_before_command", [False, True])
+def test_local_command_rejects_target_time_option(command, option, option_before_command, capsys):
+    command_args = [command, "dir"] if command == "cache" else [command]
+    raw_args = [option, *command_args] if option_before_command else [*command_args, option]
+
+    with pytest.raises(SystemExit):
+        parse_arguments(raw_args)
+
+    assert f"argument {option}: not allowed with command '{command}'" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "raw_args",
+    [
+        ["--port", "COM4", "--utc", "--sync-rtc", "pip", "list"],
+        ["pip", "--port", "COM4", "--utc", "--sync-rtc", "list"],
+        ["pip", "list", "--port", "COM4", "--utc", "--sync-rtc"],
+    ],
+)
+def test_target_time_options_allow_flexible_placement(raw_args):
+    args = parse_arguments(raw_args)
+
+    assert args.port == "COM4"
+    assert args.utc is True
+    assert args.sync_rtc is True
+
+
+@pytest.mark.parametrize(
+    ("time_args", "expected_uses_local_time", "expected_events"),
+    [
+        ([], True, ["list"]),
+        (["--sync-rtc"], True, ["sync_rtc", "list"]),
+        (["--sync-rtc", "--utc"], False, ["sync_rtc", "list"]),
+    ],
+)
+def test_main_configures_and_optionally_syncs_target_time(
+    monkeypatch, time_args, expected_uses_local_time, expected_events
+):
+    events = []
+    create_kwargs = {}
+
+    class FakeTargetManager:
+        def sync_rtc(self):
+            events.append("sync_rtc")
+
+    def create_target_manager(**kwargs):
+        create_kwargs.update(kwargs)
+        return FakeTargetManager()
+
+    def list_packages(self, outdated=False):
+        events.append("list")
+
+    monkeypatch.setattr(minny, "create_target_manager", create_target_manager)
+    monkeypatch.setattr(PipInstaller, "list", list_packages)
+
+    original_handlers = minny.logger.handlers.copy()
+    try:
+        assert minny.main(["--port", "COM4", *time_args, "pip", "list"]) == 0
+    finally:
+        minny.logger.handlers[:] = original_handlers
+
+    assert create_kwargs["uses_local_time"] is expected_uses_local_time
+    assert expected_events == events
 
 
 @pytest.mark.parametrize(
@@ -135,6 +204,76 @@ def test_main_passes_sync_policies(tmp_path, monkeypatch):
         minny.logger.handlers[:] = original_handlers
 
     assert received == {"reinstall": True, "upgrade": True}
+
+
+def test_deploy_accepts_dry_run_no_delete_rescan_and_yes():
+    args = parse_arguments(["deploy", "--dry-run", "--no-delete", "--rescan", "--yes"])
+
+    assert args.dry_run is True
+    assert args.no_delete is True
+    assert args.rescan is True
+    assert args.yes is True
+
+
+@pytest.mark.parametrize("command", ["deploy", "run"])
+def test_deploying_command_help_explains_whole_target_reconciliation(command, capsys):
+    with pytest.raises(SystemExit):
+        parse_arguments([command, "--help"])
+
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "entire target filesystem match the declared project environment" in help_text
+
+
+@pytest.mark.parametrize("extra_args, expected_no_restart", [([], False), (["--no-restart"], True)])
+def test_main_passes_run_options(tmp_path, monkeypatch, extra_args, expected_no_restart):
+    project_dir = tmp_path / "project"
+    target_dir = tmp_path / "target"
+    project_dir.mkdir()
+    target_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text("", encoding="utf-8")
+    received = {}
+
+    def run(self, script, mpy_cross_path=None, no_restart=False, **kwargs):
+        received.update(
+            script=script,
+            mpy_cross_path=mpy_cross_path,
+            no_restart=no_restart,
+            no_delete=kwargs.get("no_delete", False),
+            rescan=kwargs.get("rescan", False),
+            yes=kwargs.get("yes", False),
+        )
+
+    monkeypatch.setattr(ProjectManager, "run", run)
+    original_handlers = minny.logger.handlers.copy()
+    try:
+        assert (
+            minny.main(
+                [
+                    "--dir",
+                    str(target_dir),
+                    "run",
+                    "--project",
+                    str(project_dir),
+                    "--no-delete",
+                    "--rescan",
+                    "--yes",
+                    *extra_args,
+                    "example.py",
+                ]
+            )
+            == 0
+        )
+    finally:
+        minny.logger.handlers[:] = original_handlers
+
+    assert received == {
+        "script": "example.py",
+        "mpy_cross_path": None,
+        "no_restart": expected_no_restart,
+        "no_delete": True,
+        "rescan": True,
+        "yes": True,
+    }
 
 
 def test_direct_install_warns_about_requirement_conflicts(tmp_path, monkeypatch, capsys):

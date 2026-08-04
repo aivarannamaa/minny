@@ -10,13 +10,17 @@
 
 Minny is like [uv](https://docs.astral.sh/uv/) or [Poetry](https://python-poetry.org/docs/) for MicroPython and CircuitPython projects—it enables managing your project's development and runtime environment in a declarative way.
 
-> **Note:** Minny's main features are useful only if you keep your project in a local folder on your development machine. You don't need it when you edit files directly on the device, but keep reading—maybe you'll start liking the local-first workflow!
+Minny follows a local-first deployment model: the project directory and its declarative configuration are the source of truth, while the connected device is a replaceable execution target. Think of the device filesystem as build output, not as the reliable home of your source code, credentials, configuration, or valuable device-generated data. Firmware installation or recovery, filesystem corruption, and replacing the board must not destroy the only copy of anything important.
+
+When you run `minny deploy`, Minny reconciles the entire target filesystem with the declared project environment. It writes the declared application and package outputs and removes every other target path except those covered by no-delete rules. Deploy is therefore not an additive file-copy operation.
+
+> **Note:** Minny's project features are intended for code kept in a local folder on your development machine. If you edit files directly on the device and treat those files as the primary copy, Minny's deployment model is not a good fit.
 
 ### Declarative
 
 Uploading your files with [mpremote](https://docs.micropython.org/en/latest/reference/mpremote.html) or installing dependencies with [Circup](https://github.com/adafruit/circup) is straightforward, but it may become tedious if you need to reproduce the same setup on another board (or on the same board after upgrading its firmware).
 
-With Minny, you write down your dependencies and deployment rules in [_pyproject.toml_](https://packaging.python.org/en/latest/guides/writing-pyproject-toml/) once, and let the tool take care of setting up the device.
+With Minny, you write down your dependencies and deployment rules in [_pyproject.toml_](https://packaging.python.org/en/latest/guides/writing-pyproject-toml/) once, and let the tool recreate the declared environment on the same board after a firmware upgrade or on another compatible board.
 
 Here is a sample configuration for a MicroPython app:
 
@@ -29,13 +33,15 @@ mip = [
 ]
 
 [[tool.minny.deploy.files]]
-source = "src"
-destination = "/flash"
+source-dir = "src"
+target-dir = "/flash"
 include = ["**/*.py", "configuration.json"]
-compile = "auto"  # compiles all .py files on the fly except main.py and boot.py
+compile = "auto"  # compiles .py files on the fly except boot.py, main.py, and code.py
 
 # no need to mention deploying dependencies—these will be copied over by default
 ```
+
+Each application-file rule selects paths relative to `source-dir`, which defaults to the project directory (`"."`). `include` and `exclude` default to empty lists, so application files are deployed only when selected explicitly. `target-dir = "auto"` uses the target's application root. The default `compile = "auto"` compiles Python files except the source-root entry files _boot.py_, _main.py_, and _code.py_; use an array of glob patterns for explicit compilation selection and `no-compile` for exclusions.
 
 Here's another example for a CircuitPython app:
 
@@ -48,9 +54,11 @@ pip = [
 ]
 circup = ["multi_keypad"]
 
+[[tool.minny.deploy.files]]
+include = ["*.py"]
 
-# [[tool.minny.deploy.files]] block not needed because of useful defaults,
-# but we want to skip some transitive dependencies that are not required at runtime:
+# Packages are deployed by default, but we want to skip some transitive
+# dependencies that are not required at runtime:
 [[tool.minny.deploy.packages]]
 exclude = ["adafruit-circuitpython-typing", "typing-extensions"] 
 ```
@@ -148,6 +156,8 @@ The application can include a co-located package by declaring `-e .` in the appr
 
 ### Runtime environment
 
+Deploy reconciles the entire target filesystem with the declared project environment. Undeclared target paths are removed by default, so do not keep the only copy of an important file on the device. Store lasting inputs locally or elsewhere and deploy them explicitly; arrange for valuable runtime output to be exported from the device. Use no-delete rules only for target paths which deliberately remain outside reconciliation.
+
 Once you're ready to test your code, plug in a device and execute something like this:
 
 ```bash
@@ -159,6 +169,7 @@ Under the hood, this command performs the following steps:
 1. Perform a `minny sync` to make sure the _.minny/lib_ folder is in sync with your project specification.
 2. Transfer all explicitly declared packages to your device's `lib` folder, including a co-located package declared with `-e .`. By default, Minny compiles .py files to .mpy files on the fly.
 3. Copy the main files (e.g., _main.py_, _code.py_, _boot.py_, and helper modules) to the device's main folder, according to the deploy rules specified in _pyproject.toml_.
+4. Remove target paths which are neither declared deployment outputs nor covered by a no-delete rule.
 
 Now you can press Ctrl-D on your device and test your program. If you're not satisfied, edit some files and invoke the same command again—this time it will be faster as only changed files need to be updated on the device.
 
@@ -168,7 +179,11 @@ Alternatively, you can execute following command:
 minny --port COM4 run my-test.py
 ```
 
-This would be like `deploy` followed by sending the contents of _my-test.py_ to the REPL, except that _main.py_ would not be updated on the board.
+This performs a regular `deploy`, restarts the interpreter to provide fresh VM state, and then sends the contents of _my-test.py_ to the REPL. Pass `--no-restart` to run in the current VM state instead.
+
+Minny assumes target files are changed only through Minny and normally trusts its local record of target files and directory contents to make repeated deployment fast. Use `--rescan` with `deploy` or `run` after editing or creating device files with another tool; it rechecks desired files and refreshes target directory inventories before deployment.
+
+Deployment rules determine the desired files and their destinations, while `tool.minny.deploy.no-delete` is the only configuration which limits exact reconciliation. Before deleting anything, Minny briefly explains whole-target reconciliation, shows the deletion candidates, and asks for confirmation; run with `-v` before the command to also see the effective deployment settings and plan counts, or use `--yes` for unattended deployment. `tool.minny.deploy.no-delete` lists target globs which pruning must retain and defaults to `["/sd", "/rom", "/ram", "/boot.py", "/boot.txt", "/flash/boot.py", "/safemode.py", "/safemode.txt", "/repl.py", "/flash/SKIPSD", "/settings.toml", "/webrepl_cfg.py", "/flash/webrepl_cfg.py", "/boot_out.txt", "/.*", "/flash/.*"]`; an explicit list replaces this default. The defaults retain conventional device-specific boot, recovery, credential, firmware-generated, and top-level hidden state, but not application entry points such as _main.py_ and _code.py_. The `--no-delete` command-line option retains all undeclared paths for one invocation. No-delete rules limit deletion only: they do not make retained data durable, and they do not prevent explicitly configured files from being created or updated at matching paths.
 
 ### Lower-level commands
 If you prefer to manage your dependencies manually, you can use Minny's lower-level commands for installing, uninstalling, and listing. Some examples:

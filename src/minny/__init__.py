@@ -62,7 +62,10 @@ def main(raw_args: list[str] | None = None) -> int:
                 mount=args_dict.get("mount"),
                 dir=args_dict.get("dir"),
                 minny_cache_dir=cache_dir,
+                uses_local_time=not args_dict.get("utc", False),
             )
+            if args_dict.get("sync_rtc", False):
+                tmgr.sync_rtc()
 
         target_dir = args_dict.get("lib_dir", None)
 

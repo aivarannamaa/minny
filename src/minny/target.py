@@ -3,6 +3,7 @@ import binascii
 import errno
 import io
 import os.path
+import posixpath
 import re
 import stat
 import sys
@@ -15,7 +16,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from logging import getLogger
 from textwrap import dedent
-from typing import Any, BinaryIO, cast
+from typing import Any, BinaryIO, Literal, cast
 
 from minny.common import ManagementError, ProtocolError, UserError
 from minny.connection import MicroPythonConnection
@@ -127,6 +128,8 @@ FALLBACK_BUILTIN_MODULES = [
 logger = getLogger(__name__)
 
 OutputConsumer = Callable[[str, str], None]
+DirectoryEntryKind = Literal["file", "dir", "other"]
+DirectoryInfo = dict[str, DirectoryEntryKind]
 
 
 class TargetManager(ABC):
@@ -162,6 +165,9 @@ class TargetManager(ABC):
 
     def _get_tracking_cookie_path(self) -> str:
         return self.join_path(self.get_minny_folder_path(), "cookie")
+
+    def get_tracking_cookie_path(self) -> str:
+        return self._get_tracking_cookie_path()
 
     def get_existing_tracking_cookie(self) -> str | None:
         path = self._get_tracking_cookie_path()
@@ -205,6 +211,18 @@ class TargetManager(ABC):
     @abstractmethod
     def get_sys_implementation(self) -> dict[str, Any]: ...
 
+    def run_user_program_via_repl(
+        self,
+        source: str,
+        restart_interpreter_before_run: bool,
+        populate_argv: bool,
+        argv: list[str],
+    ) -> None:
+        raise UserError("This target does not support running code via REPL")
+
+    def sync_rtc(self) -> None:
+        raise UserError("This target does not support RTC synchronization")
+
     def get_default_target(self) -> str:
         sys_path = self.get_sys_path()
         # M5-Flow 2.0.0 has both /lib and /flash/libs
@@ -217,6 +235,23 @@ class TargetManager(ABC):
                 return entry
         raise AssertionError("Could not determine default target")
 
+    def get_default_application_target(self) -> str:
+        library_target = self.get_default_target()
+        application_target, _ = self.split_dir_and_basename(library_target)
+        return application_target
+
+    def resolve_project_target_dir(self, path: str) -> str:
+        display_path = path.replace("\\", "/")
+        normalized_display_path = posixpath.normpath(display_path)
+        canonical_display_path = display_path.rstrip("/") or "/"
+        if (
+            not display_path.startswith("/")
+            or display_path.startswith("//")
+            or normalized_display_path != canonical_display_path
+        ):
+            raise UserError(f"Target directory must be an absolute normalized path: {path!r}")
+        return self.normpath(normalized_display_path)
+
     def split_dir_and_basename(self, path: str) -> tuple[str, str | None]:
         dir_name, basename = path.rsplit(self.get_dir_sep(), maxsplit=1)
         if dir_name == "" and path.startswith(self.get_dir_sep()):
@@ -225,6 +260,9 @@ class TargetManager(ABC):
 
     def normpath(self, path: str) -> str:
         return path.replace("\\", self.get_dir_sep()).replace("/", self.get_dir_sep())
+
+    def get_display_path(self, path: str) -> str:
+        return path.replace(self.get_dir_sep(), "/")
 
     def ensure_dir_and_write_file(self, path: str, content: bytes) -> None:
         parent, _ = self.split_dir_and_basename(path)
@@ -381,6 +419,21 @@ class TargetManager(ABC):
     def listdir(self, path: str) -> list[str]:
         return self._raw_listdir(path)
 
+    def get_directory_info(self, path: str) -> DirectoryInfo:
+        if not self.is_dir(path):
+            return {}
+
+        result: DirectoryInfo = {}
+        for name in self.listdir(path):
+            child_path = self.join_path(path, name)
+            if self.is_dir(child_path):
+                result[name] = "dir"
+            elif self.is_file(child_path):
+                result[name] = "file"
+            else:
+                result[name] = "other"
+        return result
+
     @abstractmethod
     def _raw_listdir(self, path: str) -> list[str]: ...
 
@@ -390,6 +443,14 @@ class TargetManager(ABC):
 
     @abstractmethod
     def _raw_rmdir(self, path: str) -> None: ...
+
+    def delete_recursively(self, paths: list[str]) -> None:
+        self._raw_delete_recursively(paths)
+        for path in paths:
+            self._tracker.record_removed_directory(path)
+
+    @abstractmethod
+    def _raw_delete_recursively(self, paths: list[str]) -> None: ...
 
 
 class ProperTargetManager(TargetManager, ABC):
@@ -1827,11 +1888,6 @@ class ProperTargetManager(TargetManager, ABC):
 
         return bytes_sent
 
-    def delete_recursively(self, paths: list[str]) -> None:
-        self._raw_delete_recursively(paths)
-        for path in paths:
-            self._tracker.record_removed_directory(path)
-
     def _raw_delete_recursively(self, paths: list[str]) -> None:
         self._delete_recursively_via_repl(paths)
 
@@ -2059,6 +2115,7 @@ def create_target_manager(
     mount: str | None = None,
     dir: str | None = None,
     minny_cache_dir: str | None = None,
+    uses_local_time: bool = True,
 ) -> TargetManager:
     if port is None and mount is None and dir is None:
         candidates = _infer_possible_targets()
@@ -2082,7 +2139,7 @@ def create_target_manager(
             submit_mode=None,
             write_block_size=None,
             write_block_delay=None,
-            uses_local_time=False,
+            uses_local_time=uses_local_time,
             clean=False,
             cwd=None,
             interrupt=True,

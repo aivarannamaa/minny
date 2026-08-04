@@ -1,4 +1,5 @@
 import os.path
+import shutil
 import tempfile
 import threading
 import zlib
@@ -6,12 +7,19 @@ from collections.abc import Callable
 from logging import getLogger
 from typing import Any, BinaryIO
 
-from minny.target import TargetManager, UserError
+from minny.target import DirectoryInfo, TargetManager, UserError
 
 logger = getLogger(__name__)
 
 
 class DirTargetManager(TargetManager):
+    def _raw_delete_recursively(self, paths: list[str]) -> None:
+        for path in paths:
+            if os.path.isdir(path):
+                shutil.rmtree(path)
+            else:
+                os.remove(path)
+
     def _raw_mkdir(self, path: str) -> None:
         os.mkdir(path)
 
@@ -100,6 +108,21 @@ class DirTargetManager(TargetManager):
     def _raw_listdir(self, path: str) -> list[str]:
         return os.listdir(path)
 
+    def get_directory_info(self, path: str) -> DirectoryInfo:
+        if not os.path.isdir(path):
+            return {}
+
+        result: DirectoryInfo = {}
+        with os.scandir(path) as entries:
+            for entry in entries:
+                if entry.is_dir():
+                    result[entry.name] = "dir"
+                elif entry.is_file():
+                    result[entry.name] = "file"
+                else:
+                    result[entry.name] = "other"
+        return result
+
     def _raw_rmdir(self, path: str) -> None:
         os.rmdir(path)
 
@@ -120,6 +143,22 @@ class DirTargetManager(TargetManager):
 
     def get_default_target(self) -> str:
         return self.base_path
+
+    def get_default_application_target(self) -> str:
+        return self.base_path
+
+    def resolve_project_target_dir(self, path: str) -> str:
+        normalized_path = super().resolve_project_target_dir(path)
+        relative_path = normalized_path.lstrip("/\\")
+        return os.path.join(self.base_path, relative_path) if relative_path else self.base_path
+
+    def get_display_path(self, path: str) -> str:
+        relative_path = os.path.relpath(path, self.base_path)
+        if relative_path == ".":
+            return "/"
+        if relative_path != ".." and not relative_path.startswith(f"..{os.path.sep}"):
+            return "/" + relative_path.replace(os.path.sep, "/")
+        return super().get_display_path(path)
 
 
 class DummyTargetManager(DirTargetManager):

@@ -12,20 +12,20 @@ circup = ["some-obscure-lib"]
 # It may be dangerous to assign default value for exclude.
 
 [[tool.minny.deploy.files]]
-source = "src" # default: "auto". Must be relative to pyproject.toml
-destination = "/" # default: "auto". Real path must be absolute
-include = ["main.py", "code.py", "boot.py"] # default: "auto"
+source-dir = "src" # default: ".". Must be relative to pyproject.toml
+target-dir = "/" # default: "auto". Real path must be absolute
+include = ["main.py", "code.py", "boot.py"] # default: []
 exclude = ["special-module.py"] # default: []
-compile = ["**/*.py"] # default: "auto", meaning entry files don't get compiled. Most users would use either "auto" or []
+compile = ["**/*.py"] # default: "auto", meaning source-root entry files don't get compiled
 
 [[tool.minny.deploy.files]]
-destination = "/lib" # default: "auto". Real path must be absolute
+target-dir = "/lib" # default: "auto". Real path must be absolute
 include = ["special-module.py"]
 
 [[tool.minny.deploy.packages]]
 # All selection values refer to packages, not files (including compile).
 # If you want to tweak a package, then exclude it here and deploy as files. In the future I may add exclude-files
-destination = "/lib" # default: "auto". Real path must be absolute
+target-dir = "/lib" # default: "auto". Real path must be absolute
 include = ["*"] # defaults to all dependencies
 exclude = ["asyncio"]
 

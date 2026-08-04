@@ -5,6 +5,7 @@ from typing import Any
 from minny import __version__
 
 TARGET_SELECTION_OPTIONS = ("-p", "--port", "-m", "--mount", "-d", "--dir")
+TARGET_OPTIONS = TARGET_SELECTION_OPTIONS + ("--utc", "--sync-rtc")
 
 
 def _process_remainder_args(args: Any, reminder: list[str]) -> list[str]:
@@ -25,9 +26,9 @@ def _process_remainder_args(args: Any, reminder: list[str]) -> list[str]:
     return []
 
 
-def _find_target_selection_option(raw_args: list[str]) -> str | None:
+def _find_target_option(raw_args: list[str]) -> str | None:
     for arg in raw_args:
-        for option in TARGET_SELECTION_OPTIONS:
+        for option in TARGET_OPTIONS:
             if arg == option or arg.startswith(f"{option}="):
                 return option
 
@@ -38,35 +39,45 @@ def _find_target_selection_option(raw_args: list[str]) -> str | None:
     return None
 
 
-def _add_connection_args(parser: argparse.ArgumentParser) -> None:
-    """Add connection args at this level with defaults suppressed when not specified.
+def _add_target_args(parser: argparse.ArgumentParser) -> None:
+    """Add target args at this level with defaults suppressed when not specified.
 
     We avoid parent parsers, because we can't freely use argument groups with them.
     """
-    connection_group = parser.add_argument_group(
-        title="target selection (pick one or let minny autodetect the port or mount)"
-    )
-    connection_exclusive_group = connection_group.add_mutually_exclusive_group()
+    target_group = parser.add_argument_group(title="target")
+    target_selection_group = target_group.add_mutually_exclusive_group()
 
-    connection_exclusive_group.add_argument(
+    target_selection_group.add_argument(
         "-p",
         "--port",
         help="Serial port of the target device",
         metavar="<port>",
         default=argparse.SUPPRESS,
     )
-    connection_exclusive_group.add_argument(
+    target_selection_group.add_argument(
         "-m",
         "--mount",
         help="Mount point (volume, disk, drive) of the target device",
         metavar="<path>",
         default=argparse.SUPPRESS,
     )
-    connection_exclusive_group.add_argument(
+    target_selection_group.add_argument(
         "-d",
         "--dir",
         help="Directory in the local filesystem",
         metavar="<path>",
+        default=argparse.SUPPRESS,
+    )
+    target_group.add_argument(
+        "--utc",
+        help="Assume the device RTC and filesystem timestamps use UTC (default: local time)",
+        action="store_true",
+        default=argparse.SUPPRESS,
+    )
+    target_group.add_argument(
+        "--sync-rtc",
+        help="Set the device RTC from the computer after connecting",
+        action="store_true",
         default=argparse.SUPPRESS,
     )
 
@@ -81,7 +92,7 @@ def _add_installer_commands(
         help=f"A {installer_name}-like tool for direct management of packages",
         description=description,
     )
-    _add_connection_args(installer_parser)
+    _add_target_args(installer_parser)
     subparsers = installer_parser.add_subparsers(
         title="commands",
         description=f'Use "minny {installer_name} <command> -h" for usage help of a command ',
@@ -90,7 +101,7 @@ def _add_installer_commands(
     )
 
     install_parser = subparsers.add_parser("install", help="Install packages.")
-    _add_connection_args(install_parser)
+    _add_target_args(install_parser)
     install_parser.add_argument(
         "extended_specs",
         help="Package specification",
@@ -119,7 +130,7 @@ def _add_installer_commands(
     )
 
     uninstall_parser = subparsers.add_parser("uninstall", help="Uninstall packages.")
-    _add_connection_args(uninstall_parser)
+    _add_target_args(uninstall_parser)
     uninstall_parser.add_argument(
         "packages",
         help="Package name",
@@ -128,7 +139,7 @@ def _add_installer_commands(
     )
 
     list_parser = subparsers.add_parser("list", help="List installed packages.")
-    _add_connection_args(list_parser)
+    _add_target_args(list_parser)
     list_parser.add_argument(
         "-o",
         "--outdated",
@@ -182,8 +193,8 @@ def parse_arguments(raw_args: list[str] | None = None) -> Any:
     #     metavar="<path>",
     # )
 
-    # Add connection args at root level
-    _add_connection_args(main_parser)
+    # Add target args at root level
+    _add_target_args(main_parser)
 
     # sub-parsers
     top_subparsers = main_parser.add_subparsers(
@@ -207,16 +218,66 @@ def parse_arguments(raw_args: list[str] | None = None) -> Any:
         action="store_true",
     )
 
-    deploy_parser = top_subparsers.add_parser("deploy", help="Deploy project to device")
-    _add_connection_args(deploy_parser)
+    deploy_parser = top_subparsers.add_parser(
+        "deploy",
+        help="Make target match the declared project environment",
+        description=(
+            "Make the entire target filesystem match the declared project environment. "
+            "Declared outputs are written and undeclared paths are removed unless covered "
+            "by no-delete rules."
+        ),
+    )
+    _add_target_args(deploy_parser)
     deploy_parser.add_argument(
-        "--clean",
-        help="Clean slate deployment: replace all packages on device (default: preserve existing packages)",
+        "--dry-run",
+        help="Show the deployment plan without changing the device",
+        action="store_true",
+    )
+    deploy_parser.add_argument(
+        "--no-delete",
+        help="Deploy desired files without deleting undeclared target files",
+        action="store_true",
+    )
+    deploy_parser.add_argument(
+        "--yes",
+        help="Proceed without prompting for confirmation of planned deletions",
+        action="store_true",
+    )
+    deploy_parser.add_argument(
+        "--rescan",
+        help="Inspect target directories and files instead of trusting cached target state",
         action="store_true",
     )
 
-    run_parser = top_subparsers.add_parser("run", help="Deploy and run a script on device")
-    _add_connection_args(run_parser)
+    run_parser = top_subparsers.add_parser(
+        "run",
+        help="Make target match the project and run a local script",
+        description=(
+            "Deploy by making the entire target filesystem match the declared project "
+            "environment, then restart the interpreter and run a local script on the device."
+        ),
+    )
+    _add_target_args(run_parser)
+    run_parser.add_argument(
+        "--no-delete",
+        help="Deploy desired files without deleting undeclared target files",
+        action="store_true",
+    )
+    run_parser.add_argument(
+        "--yes",
+        help="Proceed without prompting for confirmation of planned deletions",
+        action="store_true",
+    )
+    run_parser.add_argument(
+        "--rescan",
+        help="Inspect target directories and files instead of trusting cached target state",
+        action="store_true",
+    )
+    run_parser.add_argument(
+        "--no-restart",
+        help="Run in the current VM state instead of restarting the interpreter",
+        action="store_true",
+    )
 
     _add_installer_commands(top_subparsers, "pip", "Manages packages from PyPI namespace")
     _add_installer_commands(top_subparsers, "mip", "Manages packages from the mip namespace")
@@ -229,9 +290,7 @@ def parse_arguments(raw_args: list[str] | None = None) -> Any:
     cache_parser.add_argument("cache_command", choices=["dir", "info", "list", "purge"])
 
     # Add script argument for run command
-    run_parser.add_argument(
-        "script", help="Python script to run on the device", nargs="?", metavar="<script>"
-    )
+    run_parser.add_argument("script", help="Python script to run on the device", metavar="<script>")
 
     for parser in [sync_parser, deploy_parser, run_parser]:
         parser.add_argument("--project", help="Path of the project", default=None)
@@ -240,11 +299,11 @@ def parse_arguments(raw_args: list[str] | None = None) -> Any:
     # when subparsers are involved. Parse trailing install specs manually.
     args, remainder = main_parser.parse_known_args(args=raw_args)
 
-    if args.main_command == "sync":
-        target_selection_option = _find_target_selection_option(raw_args)
-        if target_selection_option is not None:
+    if args.main_command in {"cache", "sync"}:
+        target_option = _find_target_option(raw_args)
+        if target_option is not None:
             main_parser.error(
-                f"argument {target_selection_option}: not allowed with command 'sync'"
+                f"argument {target_option}: not allowed with command '{args.main_command}'"
             )
 
     bad_remainder = _process_remainder_args(args, remainder)
